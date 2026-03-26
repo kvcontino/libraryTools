@@ -1,6 +1,7 @@
 import re
 import shutil
 import subprocess
+from tracemalloc import start
 import zipfile
 import difflib
 import logging
@@ -221,8 +222,7 @@ def process_pdf(fpath, book_dir):
                 shutil.move(str(img_path), str(img_dst / img_path.name))
 
         shutil.rmtree(temp_out)
-        pbar.update(min(CHUNK_SIZE, end - start + 1 - OVERLAP))
-
+        pbar.update(min(CHUNK_SIZE, pages - start))
     pbar.close()
 
     meta = extract_pdf_metadata(fpath, pages)

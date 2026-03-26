@@ -5,7 +5,7 @@ toward a personal library that's efficient, searchable, and readable
 A specialized ETL pipeline designed to transform a stagnant collection of PDFs and eBooks into a high-utility, searchable, and reflowable Markdown library.
 
 ## The Strategy
-This project addresses the "middle-layer inefficiency" of document management by bypassing standard PDF viewers in favor of a **web-state** library. It uses:
+This project addresses the "middle-layer inefficiency" of document management by bypassing standard PDF viewers in favor of a web-state library. It uses:
 
 * **Marker (AI-OCR):** For complex PDF layout reconstruction.
 * **Pandoc:** For high-fidelity eBook-to-Markdown conversion.

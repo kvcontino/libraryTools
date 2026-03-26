@@ -31,8 +31,7 @@ def verify_image_links(md_path, book_dir):
 def process_pdf(fpath, book_dir):
     final_md = book_dir / f"{fpath.stem}.md"
     if final_md.exists(): final_md.unlink()
-    
-    # Ensure temp is clean before we start
+
     temp_out = book_dir / "temp"
     if temp_out.exists(): shutil.rmtree(temp_out)
     
@@ -42,48 +41,46 @@ def process_pdf(fpath, book_dir):
     chunk_size = 50
     pbar = tqdm(total=pages, desc=f"  📄 {fpath.stem[:20]}...", unit="pg", leave=False)
     
+    img_dst = book_dir / "images"
+    img_dst.mkdir(exist_ok=True)
+
     for start in range(0, pages, chunk_size):
         end = min(start + chunk_size - 1, pages - 1)
         
-        temp_out = book_dir / "temp"
+        abs_temp_out = str(temp_out.resolve())
+        abs_fpath = str(fpath.resolve())
+
         subprocess.run([
-            "marker_single", str(fpath),
-            "--output_dir", str(temp_out),
+            "marker_single", abs_fpath,
+            "--output_dir", abs_temp_out,
             "--page_range", f"{start}-{end}",
-            "--pdftext_workers", "1"
-            "--extract_images" # Ensure this is present
-        ], check=True)
+            "--pdftext_workers", "1",
+            "--extract_images", "True" 
+        ], check=True, capture_output=True)
         
         gen_folder = next(temp_out.iterdir())
         src_md = gen_folder / f"{gen_folder.name}.md"
         
-        with open(src_md, "r") as src, open(final_md, "a") as dst:
-            dst.write(src.read() + "\n\n")
+        # 1. READ AND FIX LINKS BEFORE STITCHING
+        with open(src_md, "r") as f:
+            chunk_content = f.read()
+        
+        # This fixes the "Missing Images" by prepending 'images/' to links
+        chunk_content = re.sub(r'!\[(.*?)\]\((?!images/)(.*?)\)', r'![\1](images/\2)', chunk_content)
+        
+        with open(final_md, "a") as dst:
+            dst.write(chunk_content + "\n\n")
             
-        img_dst = book_dir / "images"
-        img_dst.mkdir(exist_ok=True)
-        img_src = gen_folder / "images"
-        if img_src.exists():
-            for img in img_src.iterdir():
-                shutil.move(str(img), str(img_dst / img.name))
+        # 2. MOVE IMAGES (Check both the 'images' subfolder AND the root)
+        # Using glob handles .jpg, .png, etc. regardless of where Marker drops them
+        for img_path in gen_folder.rglob("*"):
+            if img_path.suffix.lower() in ['.png', '.jpg', '.jpeg', '.svg']:
+                shutil.move(str(img_path), str(img_dst / img_path.name))
         
         shutil.rmtree(temp_out)
-        
-        # FIXED: Move update INSIDE the loop to see progress per chunk
         pbar.update(end - start + 1)
     
     pbar.close()
-    verify_image_links(final_md, book_dir)
-
-def process_ebook(fpath, book_dir):
-    print(f"\n  -> Converting eBook via Pandoc: {fpath.name}")
-    final_md = book_dir / f"{fpath.stem}.md"
-    subprocess.run([
-        "pandoc", str(fpath), 
-        "-t", "commonmark", 
-        "-o", str(final_md),
-        f"--extract-media={book_dir}" 
-    ], check=True)
     verify_image_links(final_md, book_dir)
 
 # --- 3. MAIN LOGIC ---

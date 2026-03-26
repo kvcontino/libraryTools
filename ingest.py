@@ -51,6 +51,7 @@ def process_pdf(fpath, book_dir):
             "--output_dir", str(temp_out),
             "--page_range", f"{start}-{end}",
             "--pdftext_workers", "1"
+            "--extract_images" # Ensure this is present
         ], check=True)
         
         gen_folder = next(temp_out.iterdir())

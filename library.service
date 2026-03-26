@@ -1,0 +1,27 @@
+# library.service — systemd user service for the library file watcher.
+#
+# INSTALL:
+#   mkdir -p ~/.config/systemd/user/
+#   cp library.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable library.service
+#   systemctl --user start library.service
+#
+# CHECK STATUS:
+#   systemctl --user status library.service
+#   journalctl --user -u library.service -f
+#
+# UPDATE ExecStart below to match the actual path to watch.py on your machine.
+
+[Unit]
+Description=Library file watcher
+After=default.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 %h/scripts/watch.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

@@ -96,19 +96,28 @@ def main(dry_run=True):
 
     # FIXED: Single loop for both dry_run and execution
     for fpath in tqdm(files_to_process, desc="📚 Total Library Progress", disable=dry_run):
+        # 1. Handle the Dry Run first
         if dry_run:
             method = 'Marker' if fpath.suffix.lower() == '.pdf' else 'Pandoc'
             print(f"[DRY RUN] Target: {fpath.name} | Method: {method}")
             continue
             
+        # 2. Define the target directory
         book_dir = TARGET_DIR / fpath.stem
+        
+        # 3. THE SKIP LOGIC: Check if the final Markdown file already exists
+        # We check for the .md file specifically because the folder might 
+        # exist from a previous failed/partial run.
+        if (book_dir / f"{fpath.stem}.md").exists():
+            continue 
+
+        # 4. If we didn't skip, create the directory and start work
         book_dir.mkdir(exist_ok=True)
         
         if fpath.suffix.lower() == '.pdf':
             process_pdf(fpath, book_dir)
         else:
             process_ebook(fpath, book_dir)
-
 # --- 4. EXECUTION SWITCH ---
 
 if __name__ == "__main__":

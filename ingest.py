@@ -1,18 +1,20 @@
 import re
 import shutil
 import subprocess
-from tracemalloc import start
+import tempfile
 import zipfile
 import difflib
 import logging
 from pathlib import Path
 from datetime import datetime
 from tqdm import tqdm
+import mobi
 
 # --- 1. CONFIGURATION ---
-SOURCE_DIR = Path("~/6_reading").expanduser()
-TARGET_DIR = Path("~/Library/Markdown").expanduser()
-LOG_PATH   = TARGET_DIR / f"ingest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+SOURCE_DIR    = Path("~/6_reading").expanduser()
+TARGET_DIR    = Path("~/Library/Markdown").expanduser()
+LOG_PATH      = TARGET_DIR / f"ingest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+MARKER_SINGLE   = Path("~/marker-stable/bin/marker_single").expanduser()
 
 CHUNK_SIZE = 50   # pages per marker_single call
 OVERLAP    = 5    # pages shared between consecutive chunks
@@ -134,7 +136,11 @@ def verify_image_links(md_path):
     with open(md_path, "r") as f:
         content = f.read()
 
-    links  = re.findall(r"!\[.*?\]\((.*?)\)", content)
+    raw    = re.findall(r"!\[.*?\]\((.*?)\)", content)
+    # Strip optional title attribute: ![alt](path "title") → path
+    links  = [r.split()[0] for r in raw]
+    # Exclude fragment anchors (#...) — these are footnote refs, not file paths
+    links  = [l for l in links if not l.startswith("#")]
     broken = [l for l in links if not (md_path.parent / l).resolve().exists()]
 
     if broken:
@@ -154,9 +160,12 @@ def process_pdf(fpath, book_dir):
     img_dst.mkdir(exist_ok=True)
 
     info  = subprocess.check_output(["pdfinfo", str(fpath)]).decode()
-    pages = int(
-        next(line for line in info.split("\n") if "Pages:" in line).split()[1]
-    )
+    try:
+        pages = int(
+            next(line for line in info.split("\n") if "Pages:" in line).split()[1]
+        )
+    except (StopIteration, ValueError, IndexError) as e:
+        raise RuntimeError(f"Could not read page count from pdfinfo for {fpath.name}: {e}")
 
     pbar             = tqdm(total=pages, desc=f"  📄 {fpath.stem[:20]}...", unit="pg", leave=False)
     accumulated_tail = ""
@@ -171,7 +180,7 @@ def process_pdf(fpath, book_dir):
         try:
             subprocess.run(
                 [
-                    "marker_single", str(fpath.resolve()),
+                    str(MARKER_SINGLE), str(fpath.resolve()),
                     "--output_dir",      str(temp_out.resolve()),
                     "--page_range",      f"{start}-{end}",
                     "--pdftext_workers", "1",
@@ -275,6 +284,58 @@ def process_ebook(fpath, book_dir):
     verify_image_links(final_md)
 
 
+def process_mobi(fpath, book_dir):
+    final_md = book_dir / f"{fpath.stem}.md"
+    if final_md.exists():
+        final_md.unlink()
+
+    img_dst = book_dir / "images"
+    img_dst.mkdir(exist_ok=True)
+
+    # mobi.extract() unpacks the mobi to a temp dir and returns the main HTML path.
+    # Converting HTML→Markdown is far cheaper on memory than mobi→Markdown directly.
+    tempdir, html_path = mobi.extract(str(fpath.resolve()))
+    html_path = Path(html_path)
+
+    try:
+        subprocess.run(
+            [
+                "pandoc", str(html_path),
+                "--to",            "markdown",
+                "--extract-media", "images",
+                "--output",        str(final_md.resolve()),
+            ],
+            check=True,
+            capture_output=True,
+            cwd=book_dir,
+        )
+    except subprocess.CalledProcessError as e:
+        logging.error(
+            f"pandoc failed on {fpath.name} (via mobi extraction).\n"
+            f"  stderr: {e.stderr.decode().strip()}"
+        )
+        raise
+    finally:
+        shutil.rmtree(tempdir, ignore_errors=True)
+
+    with open(final_md, "r") as f:
+        content = f.read()
+
+    content = re.sub(
+        r"!\[(.*?)\]\((?!images/).*?/([^/]+\.(png|jpg|jpeg|svg|gif))\)",
+        r"![\1](images/\2)",
+        content,
+        flags=re.IGNORECASE,
+    )
+
+    with open(final_md, "w") as f:
+        f.write(content)
+
+    meta = extract_epub_metadata(fpath)
+    write_frontmatter(final_md, meta)
+    verify_image_links(final_md)
+
+
 # --- 7. MAIN ---
 
 def main(dry_run=False):
@@ -286,7 +347,13 @@ def main(dry_run=False):
     ]
 
     for fpath in tqdm(files_to_process, desc="📚 Total Library Progress", disable=dry_run):
-        method = "Marker" if fpath.suffix.lower() == ".pdf" else "Pandoc"
+        suffix = fpath.suffix.lower()
+        if suffix == ".pdf":
+            method = "Marker"
+        elif suffix == ".mobi":
+            method = "mobi+Pandoc"
+        else:
+            method = "Pandoc"
 
         if dry_run:
             print(f"[DRY RUN] {fpath.name}  |  Method: {method}")
@@ -302,8 +369,10 @@ def main(dry_run=False):
         logging.info(f"Processing {fpath.name} via {method}.")
 
         try:
-            if fpath.suffix.lower() == ".pdf":
+            if suffix == ".pdf":
                 process_pdf(fpath, book_dir)
+            elif suffix == ".mobi":
+                process_mobi(fpath, book_dir)
             else:
                 process_ebook(fpath, book_dir)
             logging.info(f"Finished {fpath.name}.")

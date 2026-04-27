@@ -19,7 +19,7 @@ After=default.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 %h/scripts/watch.py
+ExecStart=%h/Library/tools/.venv/bin/python %h/Library/tools/watch.py
 Restart=on-failure
 RestartSec=10
 

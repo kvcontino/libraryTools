@@ -1,7 +1,9 @@
+import argparse
 import re
 import shutil
 import subprocess
 import tempfile
+import time
 import zipfile
 import difflib
 import logging
@@ -10,15 +12,47 @@ from datetime import datetime
 from tqdm import tqdm
 import mobi
 
+import metadata as md_meta
+
 # --- 1. CONFIGURATION ---
 SOURCE_DIR    = Path("~/6_reading").expanduser()
 TARGET_DIR    = Path("~/Library/Markdown").expanduser()
 LOG_PATH      = TARGET_DIR / f"ingest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
-MARKER_SINGLE   = Path("~/marker-stable/bin/marker_single").expanduser()
+MARKER_SINGLE   = Path("~/Library/tools/.venv/bin/marker_single").expanduser()
 
 CHUNK_SIZE = 50   # pages per marker_single call
 OVERLAP    = 5    # pages shared between consecutive chunks
 TAIL_LINES = 100  # lines kept from previous chunk tail for dedup comparison
+
+# Set by main() from --enrich / LIBRARY_ENRICH; processors read it.
+ENRICH_EXTERNAL = False
+
+# Set by main() per invocation; written into frontmatter so index.py can attach
+# rows to the run row in the runs table.
+RUN_ID = None
+
+
+def _converter_version(name):
+    """Best-effort version string for the named tool. Cached per process."""
+    if name in _converter_version._cache:
+        return _converter_version._cache[name]
+    try:
+        if name == "marker":
+            out = subprocess.run(
+                [str(MARKER_SINGLE), "--version"],
+                capture_output=True, timeout=5,
+            )
+            v = (out.stdout or out.stderr).decode().strip().splitlines()[0] if (out.stdout or out.stderr) else ""
+        elif name == "pandoc":
+            out = subprocess.run(["pandoc", "--version"], capture_output=True, timeout=5)
+            v = out.stdout.decode().splitlines()[0] if out.stdout else ""
+        else:
+            v = ""
+    except (subprocess.SubprocessError, OSError, IndexError):
+        v = ""
+    _converter_version._cache[name] = v
+    return v
+_converter_version._cache = {}
 
 
 # --- 2. LOGGING ---
@@ -152,6 +186,7 @@ def verify_image_links(md_path):
 # --- 6. PROCESSORS ---
 
 def process_pdf(fpath, book_dir):
+    started = time.monotonic()
     final_md = book_dir / f"{fpath.stem}.md"
     if final_md.exists():
         final_md.unlink()
@@ -235,11 +270,14 @@ def process_pdf(fpath, book_dir):
     pbar.close()
 
     meta = extract_pdf_metadata(fpath, pages)
+    meta = md_meta.enrich(meta, fpath, body_path=final_md, enrich_external=ENRICH_EXTERNAL)
+    _attach_telemetry(meta, fpath, final_md, "marker", started)
     write_frontmatter(final_md, meta)
     verify_image_links(final_md)
 
 
 def process_ebook(fpath, book_dir):
+    started = time.monotonic()
     final_md = book_dir / f"{fpath.stem}.md"
     if final_md.exists():
         final_md.unlink()
@@ -280,11 +318,14 @@ def process_ebook(fpath, book_dir):
         f.write(content)
 
     meta = extract_epub_metadata(fpath)
+    meta = md_meta.enrich(meta, fpath, body_path=final_md, enrich_external=ENRICH_EXTERNAL)
+    _attach_telemetry(meta, fpath, final_md, "pandoc", started)
     write_frontmatter(final_md, meta)
     verify_image_links(final_md)
 
 
 def process_mobi(fpath, book_dir):
+    started = time.monotonic()
     final_md = book_dir / f"{fpath.stem}.md"
     if final_md.exists():
         final_md.unlink()
@@ -332,19 +373,63 @@ def process_mobi(fpath, book_dir):
         f.write(content)
 
     meta = extract_epub_metadata(fpath)
+    meta = md_meta.enrich(meta, fpath, body_path=final_md, enrich_external=ENRICH_EXTERNAL)
+    _attach_telemetry(meta, fpath, final_md, "mobi+pandoc", started)
     write_frontmatter(final_md, meta)
     verify_image_links(final_md)
 
 
-# --- 7. MAIN ---
+# --- 7. TELEMETRY HELPER ---
 
-def main(dry_run=False):
+def _attach_telemetry(meta, fpath, md_path, converter_name, started_monotonic):
+    """Add (4) sha256, (5) run_id, (6) telemetry fields to `meta` before write."""
+    meta["status"]              = "done"
+    meta["converter"]           = converter_name
+    meta["converter_version"]   = _converter_version(converter_name.split("+")[0])
+    meta["conversion_seconds"]  = round(time.monotonic() - started_monotonic, 2)
+    if RUN_ID:
+        meta["run_id"] = RUN_ID
+    try:
+        meta["sha256"] = md_meta.sha256_file(fpath)
+    except OSError as e:
+        logging.warning(f"Could not hash {fpath.name}: {e}")
+    try:
+        meta["extracted_chars"] = md_path.stat().st_size
+    except OSError:
+        pass
+
+
+# --- 8. MAIN ---
+
+def main(dry_run=False, enrich_external=False, smallest_first=False):
+    global ENRICH_EXTERNAL, RUN_ID
+    ENRICH_EXTERNAL = enrich_external
+
     setup_logging()
+    if ENRICH_EXTERNAL:
+        logging.info("External enrichment ENABLED (Open Library / Crossref).")
 
     files_to_process = [
         f for f in SOURCE_DIR.iterdir()
         if f.suffix.lower() in {".pdf", ".epub", ".mobi"}
     ]
+
+    if smallest_first:
+        files_to_process.sort(key=lambda p: p.stat().st_size)
+
+    # Open a brief DB connection to record the run; close before heavy work
+    # so we don't hold the lock for hours.
+    if not dry_run:
+        import sqlite3
+        from index import DB_PATH, setup_db, start_run, finish_run
+        conn = sqlite3.connect(DB_PATH)
+        setup_db(conn)
+        RUN_ID = start_run(conn, notes=f"ingest.py (enrich={ENRICH_EXTERNAL}, smallest_first={smallest_first})")
+        conn.close()
+        logging.info(f"Run started: {RUN_ID}")
+
+    done = 0
+    failed = 0
 
     for fpath in tqdm(files_to_process, desc="📚 Total Library Progress", disable=dry_run):
         suffix = fpath.suffix.lower()
@@ -376,11 +461,32 @@ def main(dry_run=False):
             else:
                 process_ebook(fpath, book_dir)
             logging.info(f"Finished {fpath.name}.")
+            done += 1
         except Exception as e:
+            failed += 1
             logging.error(f"Skipping {fpath.name} after error: {e}")
 
+    if not dry_run and RUN_ID:
+        import sqlite3
+        from index import DB_PATH, finish_run
+        conn = sqlite3.connect(DB_PATH)
+        finish_run(conn, RUN_ID, done, failed)
+        conn.close()
+        logging.info(f"Run finished: {RUN_ID} — {done} done, {failed} failed.")
 
-# --- 8. EXECUTION ---
+
+# --- 9. EXECUTION ---
 
 if __name__ == "__main__":
-    main(dry_run=False)
+    parser = argparse.ArgumentParser(description="Ingest PDFs/eBooks into ~/Library/Markdown.")
+    parser.add_argument("--dry-run", action="store_true", help="List files, don't convert.")
+    parser.add_argument("--enrich", action="store_true",
+                        help="Enable Open Library / Crossref lookup (also via LIBRARY_ENRICH=1).")
+    parser.add_argument("--smallest-first", action="store_true",
+                        help="Process smallest files first; defer the giant scans to the end.")
+    args = parser.parse_args()
+
+    import os
+    enrich = args.enrich or os.environ.get("LIBRARY_ENRICH", "").lower() in {"1", "true", "yes", "on"}
+
+    main(dry_run=args.dry_run, enrich_external=enrich, smallest_first=args.smallest_first)

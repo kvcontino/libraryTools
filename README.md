@@ -1,102 +1,271 @@
 # libraryTools
-toward a personal library that's efficient, searchable, and readable
 
-## Description
-A specialized ETL pipeline designed to transform a stagnant collection of PDFs and eBooks into a high-utility, searchable, and reflowable Markdown library.
+A small ETL pipeline that turns a folder of PDFs/EPUBs/MOBIs into a searchable Markdown library backed by SQLite + FTS5.
 
-## The Strategy
-This project addresses the "middle-layer inefficiency" of document management by bypassing standard PDF viewers in favor of a web-state library. It uses:
+```
+~/6_reading/        →   ingest.py   →   ~/Library/Markdown/<book>/<book>.md
+                        index.py    →   ~/Library/Markdown/library.db
+```
 
-* **Marker (AI-OCR):** For complex PDF layout reconstruction.
-* **Pandoc:** For high-fidelity eBook-to-Markdown conversion.
-* **Chunked Ingestion:** A memory-safe approach for processing large volumes of data on limited hardware (like my Lenovo X1 Carbon) without triggering OOM errors.
+---
 
 ## Components
 
 | File | Purpose |
-|------|---------|
-| `ingest.py` | Converts PDFs and eBooks to Markdown with YAML frontmatter and extracted images |
-| `index.py` | Builds a SQLite3 full-text search index from all converted Markdown files |
-| `watch.py` | Daemon that monitors the source directory and auto-triggers ingest + index on new files |
-| `run.sh` | Runs `ingest.py` then `index.py` in sequence; suitable for ad-hoc use or cron |
-| `library.service` | systemd user service that runs `watch.py` as a persistent background daemon |
+|---|---|
+| `ingest.py`   | Convert source files to Markdown via Marker (PDF) or Pandoc (EPUB/MOBI). Writes YAML frontmatter. |
+| `index.py`    | Read frontmatter from `*.md`, upsert rows into `books`, rebuild the FTS index. |
+| `metadata.py` | Pure utility module — author sanity filter, title cleanup, ISBN/DOI extraction, Open Library/Crossref lookup, page counting, hashing. Stdlib only. |
+| `repair.py`   | Re-run metadata heuristics over already-ingested books *without* re-converting. |
+| `report.py`   | Write a dated health report (backlog, quality flags, last run, slowest conversions). |
+| `run.sh`      | Sequential `ingest → index → report`. Always uses the venv Python. |
+| `library-ingest.service`, `library-ingest.timer` | systemd user units; the timer fires weekly and runs the full pipeline. |
+| `watch.py`, `library.service` | (legacy) optional filesystem watcher. Superseded by the timer for most uses. |
 
-## Dependencies
+---
 
-**Python packages:**
+## Daily use
+
 ```bash
-pip install marker-pdf watchdog tqdm
-```
-
-**System tools:**
-```bash
-sudo apt install pandoc poppler-utils   # poppler-utils provides pdfinfo
-```
-
-## Configuration
-
-`ingest.py` and `index.py` share two path constants at the top of each file. Edit them to match your setup:
-
-```python
-SOURCE_DIR = "~/6_reading"        # where you drop source documents (.pdf, .epub, .mobi)
-TARGET_DIR = "~/Library/Markdown" # where converted Markdown and the search index are written
-```
-
-## Usage
-
-### One-off run
-Process all pending files and update the index:
-```bash
-chmod +x run.sh   # first time only
+# One-shot
 ./run.sh
+
+# Or, for a fresh ingest with options:
+.venv/bin/python ingest.py [--dry-run] [--enrich] [--smallest-first]
+.venv/bin/python index.py
+.venv/bin/python report.py
 ```
 
-### Scheduled (cron)
-Edit your crontab (`crontab -e`) to run nightly at 2am:
-```
-0 2 * * * /path/to/run.sh >> ~/Library/Markdown/cron.log 2>&1
-```
+Always invoke the venv Python explicitly (`.venv/bin/python ...`) rather than
+the system `python3`. The venv is where `marker_pdf`, `mobi`, and the rest of
+the dependencies actually live. See [docs/python-environments.md](docs/python-environments.md)
+for the mental model.
 
-### Daemon (recommended)
-Install the systemd service to watch for new files and process them automatically:
+## Automation status
+
+**Currently: manual runs only.** The systemd timer below is disabled while
+this lives on the laptop. Marker can spike to 9–10 GB on OCR-heavy PDFs,
+which is too close to the 16 GB ceiling — `systemd-oomd` kills the run
+under PSI pressure even when the cgroup is under its absolute cap, and
+gnome-shell crashes in the same window. The plan is to enable it on the
+32 GB server, where uptime is reliable and headroom is comfortable.
+
+To run the pipeline manually:
+
 ```bash
-cp library.service ~/.config/systemd/user/
-systemctl --user enable --now library.service
-
-# Check status / logs
-systemctl --user status library.service
-journalctl --user -u library.service -f
+~/Library/tools/run.sh
+# or:
+systemctl --user start library-ingest.service     # service still installed; just not timed
 ```
 
-Drop any `.pdf`, `.epub`, or `.mobi` file into `~/6_reading` and it will be converted and indexed automatically within ~10 seconds.
+### Re-enabling the timer (do this on the server, not the laptop)
 
-## Searching the Library
+The unit files at `library-ingest.service` and `library-ingest.timer` are
+ready to use. Before re-enabling on any host, verify three things:
 
-Open the database:
+1. **Memory headroom** — leave at least 8 GB above whatever ceiling you set.
+   Marker's working set is 3–10 GB depending on the PDF.
+2. **Persistent=true behavior** — a missed scheduled run fires immediately
+   when the user-systemd starts (i.e. on login). Acceptable on a server
+   that's always up; *not* acceptable on a laptop that may be carried home
+   and reopened during work hours.
+3. **Lid / suspend behavior** — `OnCalendar=Mon 03:00` only fires if the
+   machine is awake at 03:00. On a laptop, default `HandleLidSwitch=suspend`
+   defeats this. On a server, irrelevant.
+
 ```bash
-sqlite3 ~/Library/Markdown/library.db
+# Install once (idempotent)
+mkdir -p ~/.config/systemd/user/
+cp library-ingest.service library-ingest.timer ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now library-ingest.timer
+
+# Inspect
+systemctl --user list-timers library-ingest
+systemctl --user status library-ingest.service
+journalctl --user -u library-ingest.service -n 200
+
+# Disable and clear state
+systemctl --user disable --now library-ingest.timer
+systemctl --user reset-failed library-ingest.service
 ```
 
-**Full-text search** (Porter stemming — `work` matches `working`, `worked`, etc.):
+Each run writes a dated report to `~/Library/Markdown/reports/YYYY-MM-DD.md`
+covering backlog, quality flags (junk authors, zero-page rows, missing
+hashes), the last run summary, and the slowest conversions.
+
+### Flags
+
+- `--dry-run` — list files that would be processed; touch nothing.
+- `--smallest-first` — process by ascending file size. Recommended for the first big run on this laptop: you get fast wins, surface failures early, and the giant scans run last when you can leave the machine alone.
+- `--enrich` — call Open Library (by ISBN) and Crossref (by DOI) to fix titles and authors. Off by default (network calls). Cached in `~/Library/Markdown/.metadata-cache.json` so re-runs are free. Equivalent: `LIBRARY_ENRICH=1`.
+
+---
+
+## Repairing existing rows
+
+The improvements added in 2026-04 (author sanity filter, title cleanup, page backfill, content hashing, optional external enrichment) all run inside `metadata.py`. `repair.py` walks every row already in the DB, applies those heuristics over the existing `.md` files, and rewrites the frontmatter. It does **not** re-convert source files.
+
+```bash
+# Always preview first — dry-run is the default
+python3 repair.py
+
+# Apply changes (rewrites frontmatter, then re-runs index.py)
+python3 repair.py --apply
+
+# Apply + reach out to Open Library / Crossref for the messy rows
+python3 repair.py --apply --enrich
+
+# Scope to one concern at a time
+python3 repair.py --apply --only-author
+python3 repair.py --apply --only-title
+python3 repair.py --apply --only-pages
+python3 repair.py --apply --only-hash
+```
+
+For the current state of the library: a dry run reports ~360 rows would change, of which ~180 are user-visible cleanups (titles, authors, page backfills) and the rest are silent SHA-256 backfills used for duplicate detection.
+
+**Recommended order on first repair:**
+
+```bash
+python3 repair.py --apply --only-hash       # cheap, no judgment calls
+python3 repair.py --apply --only-author     # strips PDF-junk authors
+python3 repair.py --apply --only-pages      # backfills 0-page rows
+python3 repair.py --apply --only-title      # uses H1 fallback for junk filenames
+python3 repair.py --apply --enrich          # last — slowest, hits the network
+```
+
+Run them in that order so you can stop and inspect the DB between passes.
+
+---
+
+## Ingestion: getting through the rest of the library
+
+The library currently has ~365 books indexed against ~791 source files in `~/6_reading`. The remaining ~425 (mostly PDFs, some EPUBs/MOBIs) will take 1–3 days of wall-clock to process serially on this laptop. Here's how to do it without the machine falling over.
+
+### Memory discipline
+
+Marker loads OCR + layout models that can spike past 6–10 GB per worker. With 16 GB total and swap already in heavy use during normal work, you cannot run two converters at once.
+
+**Cap each conversion in a memory cgroup** so one ugly file can't take the laptop down:
+
+```bash
+# Wrap the ingest in a 10 GB ceiling
+systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=2G \
+    python3 ~/Library/tools/ingest.py --smallest-first
+```
+
+A single OOM-killed file is recoverable (the script logs the failure and moves on). An OOM-killed session that takes the desktop with it isn't.
+
+### Reduce baseline pressure before running
+
+```bash
+free -h                                # check before starting
+sudo sysctl -w vm.swappiness=10        # discourage swap thrashing during the run
+```
+
+Close Kitty tabs, browsers, and IDEs. Ingestion needs RAM more than your editor does.
+
+### Resume-friendly behavior
+
+`ingest.py` already skips files whose `.md` already exists in `~/Library/Markdown/`. So if the run dies — Ctrl-C, OOM, reboot — just rerun. It picks up where it left off.
+
+If you suspect a particular file is the OOM culprit, move it out of `~/6_reading/` and process it later on the 32 GB server.
+
+### Don't ingest over the network mount
+
+Wait until ingestion is fully done before backing up to the server. Running ingest with sources on a remote mount multiplies I/O cost and risks corrupted partial reads on disconnect.
+
+### A reasonable invocation
+
+```bash
+nice -n 19 ionice -c2 -n7 \
+    systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=2G \
+    python3 ingest.py --smallest-first
+```
+
+`nice` lowers CPU priority, `ionice` lowers disk priority, the cgroup caps memory. Run it overnight; check the log in the morning.
+
+### Estimating progress
+
+Once the schema migration runs, every new conversion logs `conversion_seconds` into the `books` table. After ~20 conversions you can compute a real ETA:
+
 ```sql
+SELECT AVG(conversion_seconds) AS avg_s,
+       COUNT(*)                AS done,
+       SUM(conversion_seconds) AS total_s
+FROM books WHERE conversion_seconds IS NOT NULL;
+```
+
+Multiply `avg_s` by remaining file count for an estimate that beats anything you can derive from file size alone.
+
+---
+
+## Schema reference
+
+### `books`
+Original columns plus phase-2 additions:
+
+| Column | Notes |
+|---|---|
+| `id`, `md_path`, `title`, `author`, `source`, `converted`, `pages`, `indexed_at` | Original. |
+| `sha256`               | SHA-256 of the source file. Used for duplicate detection. |
+| `run_id`               | Foreign key to `runs.id`. |
+| `conversion_seconds`   | Wall-clock for this book's conversion. |
+| `converter`            | `marker`, `pandoc`, `mobi+pandoc`. |
+| `converter_version`    | Whatever `--version` returns. |
+| `extracted_chars`      | Size in bytes of the resulting `.md` file. Proxy for "did this work". |
+| `ocr_used`             | Reserved; not yet populated. |
+| `status`               | `done` / future: `failed`, `partial`. |
+| `error`                | Future: error string for failed conversions. |
+| `normalized_title`     | Lowercased + punctuation-stripped title for dedup keying. |
+| `isbn`, `doi`          | Populated by `--enrich`. |
+
+### `runs`
+Per-invocation metadata: `id`, `started_at`, `ended_at`, `host`, `files_total`, `files_done`, `files_failed`, `notes`.
+
+### `books_fts`
+Original FTS5 virtual table over `(title, author, body)` with Porter stemming.
+
+---
+
+## Common queries
+
+```sql
+-- Full-text search
 SELECT b.title, b.author, snippet(books_fts, 2, '[', ']', '...', 20)
 FROM books_fts
 JOIN books b ON books_fts.rowid = b.id
 WHERE books_fts MATCH 'your search terms'
 ORDER BY rank;
+
+-- Books with no author after the cleanup pass — candidates for --enrich
+SELECT title, source FROM books WHERE author IS NULL OR author = '';
+
+-- Books with zero pages — counter is broken or file is empty
+SELECT title, source FROM books WHERE pages = 0 OR pages IS NULL;
+
+-- Duplicates by content hash
+SELECT sha256, COUNT(*) AS n, GROUP_CONCAT(md_path, ' | ')
+FROM books WHERE sha256 IS NOT NULL
+GROUP BY sha256 HAVING n > 1;
+
+-- Slowest conversions (where to optimize)
+SELECT title, pages, conversion_seconds
+FROM books
+WHERE conversion_seconds IS NOT NULL
+ORDER BY conversion_seconds DESC LIMIT 20;
+
+-- Run history
+SELECT id, started_at, ended_at, files_done, files_failed, notes FROM runs ORDER BY started_at;
 ```
 
-**Filter by author:**
-```sql
-SELECT title, author, pages FROM books WHERE author LIKE '%Saval%';
-```
+---
 
-**Most recently converted:**
-```sql
-SELECT title, author, converted FROM books ORDER BY converted DESC LIMIT 10;
-```
+## Open follow-ups
 
-**Books missing author metadata:**
-```sql
-SELECT title, source FROM books WHERE author = '' OR author IS NULL;
-```
+These aren't implemented; they're the next obvious wins.
+
+- **Failure rows.** When a conversion fails, write a stub row (`status='failed'`) so the DB knows something was tried. Right now failures only appear in the log.
+- **Format-specific routing.** Test PDFs for an extractable text layer (`pdftotext -f 1 -l 1`) and route text-PDFs through a cheap converter like `pymupdf4llm` instead of always paying Marker's load cost.
+- **Quality score.** Combine `extracted_chars / pages` into a sanity ratio; flag rows below threshold for re-conversion.

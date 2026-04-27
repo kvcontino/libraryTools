@@ -1,0 +1,29 @@
+# library-ingest.timer — fires library-ingest.service weekly.
+#
+# Cadence: Monday 09:00 local time. Persistent=true means if the laptop is
+# off at the scheduled time, the run fires the next time the user-level
+# systemd starts (i.e. when you log in). RandomizedDelaySec staggers it so
+# multiple machines don't all hit the same minute.
+#
+# OnCalendar uses systemd's calendar syntax (`man systemd.time`).
+# Examples:
+#   OnCalendar=Mon 09:00         — every Monday, 9 AM
+#   OnCalendar=*-*-* 03:00       — every day at 3 AM
+#   OnCalendar=Sun *-*-* 02:00   — every Sunday at 2 AM
+#
+# To change the cadence, edit OnCalendar below and:
+#   systemctl --user daemon-reload
+#   systemctl --user restart library-ingest.timer
+
+[Unit]
+Description=Weekly trigger for library-ingest.service
+Requires=library-ingest.service
+
+[Timer]
+OnCalendar=Mon 09:00
+Persistent=true
+RandomizedDelaySec=15min
+Unit=library-ingest.service
+
+[Install]
+WantedBy=timers.target

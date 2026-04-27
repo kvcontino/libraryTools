@@ -1,40 +1,28 @@
 #!/usr/bin/env bash
-# run.sh — run ingest + index in sequence.
+# run.sh — run ingest + index + report in sequence.
 #
-# AD HOC:
-#   chmod +x run.sh
-#   ./run.sh
-#
-# CRON (nightly at 2am — edit with `crontab -e`):
-#   0 2 * * * /path/to/run.sh >> /home/$USER/Library/Markdown/cron.log 2>&1
-#
-# QUERY REFERENCE (sqlite3):
-#   sqlite3 ~/Library/Markdown/library.db
-#
-#   -- Full-text search (Porter stemming, so 'work' matches 'working', 'worked')
-#   SELECT b.title, b.author, snippet(books_fts, 2, '[', ']', '...', 20)
-#   FROM books_fts
-#   JOIN books b ON books_fts.rowid = b.id
-#   WHERE books_fts MATCH 'your search terms'
-#   ORDER BY rank;
-#
-#   -- Filter by author
-#   SELECT title, author, pages FROM books WHERE author LIKE '%Saval%';
-#
-#   -- Most recently converted
-#   SELECT title, author, converted FROM books ORDER BY converted DESC LIMIT 10;
-#
-#   -- Books with missing author metadata (candidates for manual cleanup)
-#   SELECT title, source FROM books WHERE author = '' OR author IS NULL;
+# Used both by the user (manual `./run.sh`) and by the systemd
+# library-ingest.service. Always uses the venv Python so all dependencies
+# (marker_pdf, mobi, etc.) resolve correctly.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PYTHON="$SCRIPT_DIR/.venv/bin/python"
+
+if [[ ! -x "$PYTHON" ]]; then
+    echo "FATAL: venv Python not found at $PYTHON" >&2
+    echo "       Bootstrap with: cd $SCRIPT_DIR && uv sync   (or: uv venv && uv pip install -r requirements.txt)" >&2
+    exit 1
+fi
 
 echo "[$(date -Iseconds)] Starting ingest..."
-python3 "$SCRIPT_DIR/ingest.py"
+"$PYTHON" "$SCRIPT_DIR/ingest.py" --smallest-first
 
 echo "[$(date -Iseconds)] Starting index..."
-python3 "$SCRIPT_DIR/index.py"
+"$PYTHON" "$SCRIPT_DIR/index.py"
+
+echo "[$(date -Iseconds)] Writing report..."
+"$PYTHON" "$SCRIPT_DIR/report.py"
 
 echo "[$(date -Iseconds)] Done."

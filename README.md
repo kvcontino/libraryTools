@@ -18,7 +18,9 @@ A small ETL pipeline that turns a folder of PDFs/EPUBs/MOBIs into a searchable M
 | `metadata.py` | Pure utility module — author sanity filter, title cleanup, ISBN/DOI extraction, Open Library/Crossref lookup, page counting, hashing. Stdlib only. |
 | `repair.py`   | Re-run metadata heuristics over already-ingested books *without* re-converting. |
 | `report.py`   | Write a dated health report (backlog, quality flags, last run, slowest conversions). |
+| `cleanup_orphans.py` | Detect and remove debris from interrupted conversions. Dry-run by default. |
 | `run.sh`      | Sequential `ingest → index → report`. Always uses the venv Python. |
+| `launch.sh`   | Wraps `run.sh` in a fresh `systemd-run` scope with the standard memory cap. Use this for daily manual runs — it sidesteps the multi-line copy-paste hazard. |
 | `library-ingest.service`, `library-ingest.timer` | systemd user units; the timer fires weekly and runs the full pipeline. |
 | `watch.py`, `library.service` | (legacy) optional filesystem watcher. Superseded by the timer for most uses. |
 
@@ -125,6 +127,28 @@ python3 repair.py --apply --only-hash
 
 For the current state of the library: a dry run reports ~360 rows would change, of which ~180 are user-visible cleanups (titles, authors, page backfills) and the rest are silent SHA-256 backfills used for duplicate detection.
 
+---
+
+## Cleaning up partial-conversion debris
+
+When ingest is interrupted (Ctrl+C, OOM, reboot), Marker's per-book working directory and `images/` subdir often survive without a final `.md`. These accumulate over weeks of interrupted runs.
+
+`cleanup_orphans.py` walks `~/Library/Markdown/` and classifies each subdirectory missing its expected `.md`:
+
+- **Healable** — source file still exists in `~/6_reading/`. The next ingest run will reattempt and overwrite. Leave alone.
+- **Zombie** — source is gone. Nothing will retry. Safe to delete.
+- **Manual review** — directory contains unexpected contents (stray .md, .json, etc.). Never auto-deleted.
+
+```fish
+# Always preview first — dry-run is the default
+python3 ~/Library/tools/cleanup_orphans.py
+
+# Apply — removes zombies only
+python3 ~/Library/tools/cleanup_orphans.py --apply
+```
+
+Worth running periodically (every few weeks of active ingestion) and after any major run. **Don't run with `--apply` while ingest is active** — the active book's directory could be classified as an orphan mid-conversion.
+
 **Recommended order on first repair:**
 
 ```bash
@@ -149,13 +173,38 @@ Marker loads OCR + layout models that can spike past 6–10 GB per worker. With 
 
 **Cap each conversion in a memory cgroup** so one ugly file can't take the laptop down:
 
-```bash
-# Wrap the ingest in a 10 GB ceiling
-systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=2G \
-    python3 ~/Library/tools/ingest.py --smallest-first
+```fish
+systemd-run --user --scope --unit=library-(date +%H%M) \
+    -p MemoryMax=8G -p MemorySwapMax=2G \
+    ~/Library/tools/run.sh
 ```
 
+**Critical: never reuse a `--unit=` name.** If a previous scope is still loaded under the same name (even after `reset-failed`), the new invocation *silently falls through* and your processes inherit the parent terminal's cgroup with **no cap**. Confirmed bitten on 2026-04-28 — Marker hit 9.5 GB RSS unbounded; Firefox got OOM-killed by systemd-oomd as collateral. Use `(date +%H%M)` or omit `--unit=` entirely.
+
+**Verify the cap is real** before walking away. ~30–60 s after launch, in another terminal:
+
+```fish
+set PID (pgrep -f marker_single | head -1)
+cat /sys/fs/cgroup(cat /proc/$PID/cgroup | cut -d: -f3)/memory.max
+```
+
+Should print a number like `8589934592` (= 8 GiB), **not** the literal string `max`. If `max`, the cap didn't apply — kill (`kill -INT (pgrep -f ingest.py)`) and relaunch with a different unit name.
+
 A single OOM-killed file is recoverable (the script logs the failure and moves on). An OOM-killed session that takes the desktop with it isn't.
+
+### When systemd-oomd kills you anyway
+
+Linux has two independent OOM defenses, and `MemoryMax` only controls one:
+
+- **Kernel OOM killer** — fires when a process exceeds its cgroup's `memory.max`. Your cap protects against this.
+- **systemd-oomd** (userspace) — watches *system-wide* PSI (`/proc/pressure/memory`). When sustained pressure trips the threshold, it picks the user-slice cgroup with highest memory+swap and SIGKILLs it, **regardless of per-cgroup caps**. This is the source of the GNOME notification "Application Stopped — Device memory is nearly full."
+
+Even with a perfect cap, the *whole system* being in pressure can trigger oomd. Marker swapping its model weights raises PSI without exceeding the cap. Mitigations:
+
+1. **Reduce baseline before launch.** Close Firefox, IDE, Claude desktop. `free -h` should show ≥10 GB available.
+2. **Lower swappiness for the run.** `sudo sysctl -w vm.swappiness=10` (default 60). Resets at reboot.
+3. **Watch pressure live.** `cat /proc/pressure/memory` — `avg10` >30 means danger zone.
+4. **Optionally exempt your scope from oomd.** Add `-p ManagedOOMMemoryPressureLimit=80%` — raises *this scope's* tolerance so oomd kills something else first. Reasonable on a dedicated ingest run; not while you're working.
 
 ### Reduce baseline pressure before running
 
@@ -178,13 +227,44 @@ Wait until ingestion is fully done before backing up to the server. Running inge
 
 ### A reasonable invocation
 
-```bash
-nice -n 19 ionice -c2 -n7 \
-    systemd-run --user --scope -p MemoryMax=10G -p MemorySwapMax=2G \
-    python3 ingest.py --smallest-first
+```fish
+# Pre-flight: confirm clean state and free RAM
+systemctl --user list-units --all "library-*"   # should show 0 loaded units
+free -h                                          # want ≥10 GB available
+
+# Launch
+~/Library/tools/launch.sh
 ```
 
-`nice` lowers CPU priority, `ionice` lowers disk priority, the cgroup caps memory. Run it overnight; check the log in the morning.
+`launch.sh` is a thin wrapper around `run.sh` that handles the `systemd-run` scope creation, picks a fresh unit name from the current time, and applies the standard cap (`MemoryMax=8G`, `MemorySwapMax=2G`, `CPUWeight=50`, `IOWeight=50`, plus `nice`/`ionice`). Read the script — it's short.
+
+**Why a wrapper script and not the systemd-run command directly?** Multi-line `systemd-run` invocations are fragile when copy-pasted into a terminal. Trailing whitespace after a backslash silently breaks the line continuation, and fish/bash then run each fragment as a separate command — the systemd-run portion errors out with no executable, and the final `~/Library/tools/run.sh` runs *outside* the scope, in your terminal's cgroup, **with no cap**. This has bitten us twice. A script file isn't subject to copy-paste corruption.
+
+**If you want to launch by hand** (one-off testing, custom flags), keep it on a single line:
+
+```fish
+systemd-run --user --scope --unit=library-(date +%H%M) -p MemoryMax=8G -p MemorySwapMax=2G -p CPUWeight=50 -p IOWeight=50 nice -n 19 ionice -c2 -n7 ~/Library/tools/run.sh
+```
+
+Run it overnight; check the log in the morning.
+
+### Always use run.sh (not bare ingest.py)
+
+`ingest.py` only converts. `index.py` registers conversions in the DB and runs near-duplicate detection. `report.py` writes the dated health report. Running `ingest.py` standalone leaves the .md files on disk but **unindexed**, and skips dedup warnings.
+
+`run.sh` runs all three stages in order. Use it. The only reason to run `ingest.py` alone is debugging a single file with `--dry-run`.
+
+### Stopping a run early
+
+```fish
+# Graceful — current Marker subprocess dies, ingest.py exits cleanly
+kill -INT (pgrep -f ingest.py)
+
+# Forceful if SIGINT hangs (rare):
+kill -TERM (pgrep -f ingest.py)
+```
+
+Either way, the in-flight book becomes a healable orphan that the next run reattempts. The pipeline is fully idempotent.
 
 ### Estimating progress
 

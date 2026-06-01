@@ -9,4 +9,12 @@ marker_chunks/
 # Ignore Python environment/cache
 __pycache__/
 .venv/
+venv/
 .env
+
+# Runtime logs and state (operational, not source)
+*.log
+.embed_rebuild.lock
+.embed_rebuild_state
+pruned_*.log
+triage_remaining.json

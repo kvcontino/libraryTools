@@ -1,0 +1,19 @@
+# library-embed.timer — polls library-embed.service every 20 minutes.
+#
+# OnBootSec ensures it also checks shortly after a reboot. Persistent=true means a
+# missed tick (machine off) fires on next start. The service itself is a cheap
+# no-op unless the library is fully converted with new books to embed, so frequent
+# polling is harmless.
+
+[Unit]
+Description=Periodic check to rebuild library embeddings after conversion
+Requires=library-embed.service
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=20min
+Persistent=true
+Unit=library-embed.service
+
+[Install]
+WantedBy=timers.target

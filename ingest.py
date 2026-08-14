@@ -197,7 +197,7 @@ def process_pdf(fpath, book_dir):
     info  = subprocess.check_output(["pdfinfo", str(fpath)]).decode()
     try:
         pages = int(
-            next(line for line in info.split("\n") if "Pages:" in line).split()[1]
+            next(line for line in info.split("\n") if line.startswith("Pages:")).split()[1]
         )
     except (StopIteration, ValueError, IndexError) as e:
         raise RuntimeError(f"Could not read page count from pdfinfo for {fpath.name}: {e}")
@@ -401,7 +401,22 @@ def _attach_telemetry(meta, fpath, md_path, converter_name, started_monotonic):
 
 # --- 8. MAIN ---
 
-def main(dry_run=False, enrich_external=False, smallest_first=False):
+def _is_complete(md_path):
+    try:
+        with open(md_path) as f:
+            for _ in range(60):
+                line = f.readline()
+                if not line:
+                    break
+                if line.strip() == 'status: done':
+                    return True
+    except OSError:
+        pass
+    return False
+
+
+
+def main(dry_run=False, enrich_external=False, smallest_first=False, formats=None):
     global ENRICH_EXTERNAL, RUN_ID
     ENRICH_EXTERNAL = enrich_external
 
@@ -417,6 +432,10 @@ def main(dry_run=False, enrich_external=False, smallest_first=False):
     if smallest_first:
         files_to_process.sort(key=lambda p: p.stat().st_size)
 
+    if formats:
+        allowed = {f".{fmt}" for fmt in formats}
+        files_to_process = [f for f in files_to_process if f.suffix.lower() in allowed]
+
     # Open a brief DB connection to record the run; close before heavy work
     # so we don't hold the lock for hours.
     if not dry_run:
@@ -424,7 +443,7 @@ def main(dry_run=False, enrich_external=False, smallest_first=False):
         from index import DB_PATH, setup_db, start_run, finish_run
         conn = sqlite3.connect(DB_PATH)
         setup_db(conn)
-        RUN_ID = start_run(conn, notes=f"ingest.py (enrich={ENRICH_EXTERNAL}, smallest_first={smallest_first})")
+        RUN_ID = start_run(conn, notes=f"ingest.py (enrich={ENRICH_EXTERNAL}, smallest_first={smallest_first}, formats={formats})")
         conn.close()
         logging.info(f"Run started: {RUN_ID}")
 
@@ -446,7 +465,8 @@ def main(dry_run=False, enrich_external=False, smallest_first=False):
 
         book_dir = TARGET_DIR / fpath.stem
 
-        if (book_dir / f"{fpath.stem}.md").exists():
+        md_path = book_dir / f"{fpath.stem}.md"
+        if md_path.exists() and _is_complete(md_path):
             logging.info(f"Skipping {fpath.name} (already converted).")
             continue
 
@@ -484,9 +504,11 @@ if __name__ == "__main__":
                         help="Enable Open Library / Crossref lookup (also via LIBRARY_ENRICH=1).")
     parser.add_argument("--smallest-first", action="store_true",
                         help="Process smallest files first; defer the giant scans to the end.")
+    parser.add_argument("--formats", nargs="+", choices=["pdf", "epub", "mobi"],
+                        metavar="FMT", help="Limit to these formats only (pdf epub mobi).")
     args = parser.parse_args()
 
     import os
     enrich = args.enrich or os.environ.get("LIBRARY_ENRICH", "").lower() in {"1", "true", "yes", "on"}
 
-    main(dry_run=args.dry_run, enrich_external=enrich, smallest_first=args.smallest_first)
+    main(dry_run=args.dry_run, enrich_external=enrich, smallest_first=args.smallest_first, formats=args.formats)

@@ -24,11 +24,10 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 
-# Memory cap matches the README's hand-run guidance — one OOM-killed file is
-# recoverable; an OOM-killed laptop is not. 16 GB total minus OS minus apps
-# leaves ~10 GB safely available for marker.
-MemoryMax=10G
-MemorySwapMax=2G
+# Memory cap: 16G on the 32 GB server leaves ~16 GB headroom for the Docker
+# stack (Nextcloud, Postgres, etc.). On the 16 GB laptop use 10G instead.
+MemoryMax=16G
+MemorySwapMax=4G
 CPUWeight=50
 IOWeight=50
 Nice=19

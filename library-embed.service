@@ -1,0 +1,31 @@
+# library-embed.service — oneshot guard that rebuilds chunks+embeddings once the
+# library is fully converted. Paired with library-embed.timer (polls every 20 min).
+# Idempotent: rebuild_embeddings_if_complete.sh no-ops unless conversion is done
+# and the converted-count changed since the last embed. Survives reboots via the
+# timer + Linger=yes.
+#
+# INSTALL (user-level systemd, no sudo):
+#   cp library-embed.service library-embed.timer ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now library-embed.timer
+#
+# CHECK:
+#   systemctl --user list-timers library-embed
+#   journalctl --user -u library-embed.service -n 100
+#   tail -f ~/Library/tools/auto_rebuild.log
+
+[Unit]
+Description=Rebuild library chunk+embedding index when conversion is complete
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Lighter caps than ingest; the embed step is CPU-bound but short-lived per book.
+MemoryMax=12G
+CPUWeight=40
+IOWeight=40
+Nice=19
+ExecStart=%h/Library/tools/rebuild_embeddings_if_complete.sh
+StandardOutput=journal
+StandardError=journal

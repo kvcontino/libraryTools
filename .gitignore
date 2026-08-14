@@ -9,7 +9,14 @@ marker_chunks/
 # Ignore Python environment/cache
 __pycache__/
 .venv/
+venv/
 .env
 
-# session logs from chunk_and_embed.py
-chunk_embed.log
+# Runtime logs and state (operational, not source)
+# `*.log` already covers chunk_embed.log and auto_rebuild.log; both are session
+# output from the two embed paths and neither belongs in the repo.
+*.log
+.embed_rebuild.lock
+.embed_rebuild_state
+pruned_*.log
+triage_remaining.json

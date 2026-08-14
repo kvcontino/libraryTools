@@ -41,6 +41,29 @@ than imported: the existing 64,515 chunks were produced by it, and a chunker
 that drifts from the one that built the corpus creates two incompatible
 populations in one table. If you change it, you are re-chunking everything.
 
+RELATIONSHIP TO rebuild_embeddings_if_complete.sh (kevadk, 2026-06-01)
+----------------------------------------------------------------------
+That script is the SERVER's answer to the same problem and the two are not
+duplicates -- keep both, and know which machine each belongs to.
+
+  rebuild_...sh   full REBUILD. Polls via library-embed.timer, waits until
+                  every source book is converted, then runs bootstrap.sh:
+                  build_chunks.py (DROP TABLE) + `llm embed-multi` over every
+                  chunk. Correct on a server that can spend a night on it.
+  this script     INCREMENTAL. Embeds only what lacks an embedding, resumes
+                  exactly, uses sentence-transformers directly.
+
+**DO NOT install library-embed.timer on the laptop.** It would call bootstrap.sh
+-> build_chunks.py -> DROP TABLE, and then `llm embed-multi` would fail because
+the `llm` CLI is not installed here -- leaving the chunks table rebuilt with new
+ids and every existing embedding orphaned, with the timer reporting failure and
+retrying the same destruction next tick. Verified 2026-08-14: that timer is NOT
+installed here, and this note exists so it stays that way.
+
+The laptop clone sat on a commit BEFORE 2026-06-01 until 2026-08-14, which is
+the real reason run.sh here had no chunk stage: the work had graduated on
+kevadk two days before the server was boxed, and was never pulled.
+
 USAGE
   chunk_and_embed.py                 # do the work
   chunk_and_embed.py --dry-run       # report what would happen, touch nothing

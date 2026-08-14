@@ -20,3 +20,6 @@ venv/
 .embed_rebuild_state
 pruned_*.log
 triage_remaining.json
+
+# uv script lockfiles (regenerated on demand)
+*.py.lock

@@ -10,3 +10,6 @@ marker_chunks/
 __pycache__/
 .venv/
 .env
+
+# session logs from chunk_and_embed.py
+chunk_embed.log

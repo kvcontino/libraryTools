@@ -45,11 +45,4 @@ echo "[$(date -Iseconds)] Chunking and embedding new books..."
 echo "[$(date -Iseconds)] Writing report..."
 "$PYTHON" "$SCRIPT_DIR/report.py"
 
-# Push results to Nextcloud if the sync script is present (kevadk only).
-# On the laptop the sync script doesn't exist — this is a no-op there.
-if [[ -x "$SCRIPT_DIR/nc_push.sh" ]]; then
-    echo "[$(date -Iseconds)] Syncing to Nextcloud..."
-    "$SCRIPT_DIR/nc_push.sh"
-fi
-
 echo "[$(date -Iseconds)] Done."

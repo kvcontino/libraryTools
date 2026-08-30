@@ -159,8 +159,14 @@ def main():
     print(f"collection  {COLLECTION} (id {coll})")
     print(f"existing    {have:,} chunks / {emb:,} embeddings — NOT touched")
     print(f"unchunked   {len(todo)} books")
+    # NOTE (2026-08-22): these two guards used to `return`, which silently
+    # defeated phase 2's self-healing promise below. A run killed between
+    # phase 1 and phase 2 leaves chunks with no embeddings; on the next run
+    # `todo` is empty (those books DO have chunks now), so the old early
+    # return skipped straight past the code that would have embedded them.
+    # Found live: 10 chunks stranded that way. Fall through instead.
     if not todo:
-        print("nothing to do"); return
+        print("            no book needs chunking — going straight to phase 2")
 
     # books_fts is the chunk source; a book with no body yields nothing.
     plan, missing = [], []
@@ -181,7 +187,7 @@ def main():
         print(f"\nestimated   {n_chunks/1.5/60:.0f} min at the measured 1.5 chunks/sec")
         print("dry run — nothing written"); return
     if not plan:
-        print("nothing chunkable"); return
+        print("            nothing chunkable — going straight to phase 2")
 
     # ---- PHASE 1: chunk everything (fast, no model needed) -----------------
     # Chunking and embedding are separate phases on purpose. The first attempt

@@ -63,6 +63,23 @@ def build_report() -> str:
     no_sha256      = q(conn, "SELECT COUNT(*) FROM books WHERE sha256 IS NULL OR sha256 = ''")[0][0]
     failed_status  = q(conn, "SELECT COUNT(*) FROM books WHERE status = 'failed'")[0][0]
 
+    # Semantic-search coverage. Added 2026-08-22 after a book was found with zero
+    # chunks: the report tracked pages/author/sha256 but was blind to whether a
+    # book was actually *searchable*. In Aug 2026, 95 of 281 books had no chunks
+    # at all -- a third of the library invisible to /librarysearch while every
+    # other flag here read healthy. Aggregate counts hid it; per-title does not.
+    unchunked = q(conn, """
+        SELECT id, title FROM books b
+        WHERE NOT EXISTS (SELECT 1 FROM book_chunks c WHERE c.book_rowid = b.id)
+        ORDER BY id
+    """)
+    # Cheap tripwire, not an exact join: embeddings.id is TEXT and book_chunks.id
+    # is INTEGER, so a CAST comparison defeats both indexes and scans ~117k x ~117k
+    # (minutes). A count mismatch catches the renumbering failure mode for O(1).
+    n_chunks = q(conn, "SELECT COUNT(*) FROM book_chunks")[0][0]
+    n_embeds = q(conn, "SELECT COUNT(*) FROM embeddings")[0][0]
+    embed_gap = n_chunks - n_embeds
+
     # Stale junk authors that should have been cleaned by repair.py
     junk_authors = q(conn, """
         SELECT title, author, source FROM books
@@ -122,6 +139,18 @@ def build_report() -> str:
     L.append(f"- Rows with 0 pages: {zero_pages}")
     L.append(f"- Rows missing sha256: {no_sha256}")
     L.append(f"- Rows with status='failed': {failed_status}")
+    if unchunked:
+        L.append(f"- **Books with ZERO chunks (not semantically searchable): {len(unchunked)}**")
+        for bid, title in unchunked[:10]:
+            L.append(f"    - id {bid} — {title}")
+        if len(unchunked) > 10:
+            L.append(f"    - …and {len(unchunked) - 10} more")
+    else:
+        L.append("- Books with zero chunks: 0 — full semantic coverage")
+    if embed_gap:
+        L.append(f"- **chunk/embedding count mismatch: {n_chunks} chunks vs {n_embeds} embeddings (gap {embed_gap})** — see chunk_and_embed.py header")
+    else:
+        L.append(f"- Chunks and embeddings in step: {n_chunks} each")
     if junk_authors:
         L.append(f"- **Junk-author rows still present (run `repair.py --apply --only-author`):** {len(junk_authors)}")
         for title, author, source in junk_authors[:10]:

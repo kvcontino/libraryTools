@@ -69,16 +69,60 @@ USAGE
   chunk_and_embed.py --dry-run       # report what would happen, touch nothing
   chunk_and_embed.py --limit 5       # first N unchunked books (for a smoke test)
 """
-import argparse, hashlib, re, sqlite3, sys, time
+import argparse, hashlib, os, re, sqlite3, sys, time
 from pathlib import Path
 
 DB_PATH = Path.home() / "Library/Markdown/library.db"
 MODEL = "nomic-ai/nomic-embed-text-v1.5"
+# `trust_remote_code=True` means the model pulls its MODELING CODE from the Hub
+# too, so a load touches the network twice — once for weights, once for
+# nomic-bert-2048. Both are cached after the first run and neither changes.
+CODE_REPO = "nomic-ai/nomic-bert-2048"
 PREFIX = "search_document: "          # nomic requires a task prefix on documents
 COLLECTION = "book_chunks"
 TARGET_CHARS = 2000
 MIN_CHARS = 50
 BATCH = 16
+
+
+
+# ------------------------------------------------------------ HF offline
+def prefer_cached_hub():
+    """Load the embedding model from disk, with no Hub call, when we can.
+
+    The 2026-08-29 run took 15m10s to embed 16 chunks. 5m24s of that was the
+    sentence-transformers import and model load — not because either is slow
+    (16s measured, warm and offline) but because the timer is `Persistent=true`
+    and fired during the 07:51 boot catch-up, BEFORE the network was up. Every
+    Hub call hung and retried until it was.
+
+    Ordering the unit after the network would be the wrong fix, and the same
+    wrong fix `wait-miniflux.sh` exists to avoid: it makes the job wait for a
+    dependency it does not actually need. The model is 523M on local disk and
+    is not going to change. So the fix is to stop calling out at all.
+
+    `HF_HUB_OFFLINE` is read into a module constant when huggingface_hub is
+    imported, so it must be set BEFORE the import — which is why this decides
+    from the filesystem rather than by catching a failure and retrying. If
+    either repo is missing from the cache (a fresh machine, a cleared cache),
+    we stay online and let the download happen normally.
+    """
+    if os.environ.get("HF_HUB_OFFLINE"):
+        return "already set in the environment"
+    root = Path(
+        os.environ.get("HF_HUB_CACHE")
+        or os.environ.get("HF_HOME", Path.home() / ".cache/huggingface") / "hub"
+    ).expanduser()
+    missing = [
+        repo for repo in (MODEL, CODE_REPO)
+        # A cached repo is a snapshot dir holding at least one real file; the
+        # bare directory can survive an interrupted download.
+        if not any((root / ("models--" + repo.replace("/", "--")) / "snapshots").glob("*/*"))
+    ]
+    if missing:
+        return "staying online — not in the cache: " + ", ".join(missing)
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    return f"offline — both repos cached under {root}"
 
 
 # ---------------------------------------------------------------- chunking
@@ -216,8 +260,11 @@ def main():
     if not pending:
         print("nothing to embed"); return
 
+    print(f"hub         {prefer_cached_hub()}", flush=True)
+    t0 = time.time()
     from sentence_transformers import SentenceTransformer
     import numpy as np
+    print(f"import      {time.time()-t0:.1f}s", flush=True)
 
     t0 = time.time()
     model = SentenceTransformer(MODEL, trust_remote_code=True)

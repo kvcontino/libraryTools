@@ -13,6 +13,34 @@ import metadata as md_meta
 TARGET_DIR = Path("~/Library/Markdown").expanduser()
 DB_PATH    = TARGET_DIR / "library.db"
 
+# Subdirectories of TARGET_DIR that hold Markdown but are NOT books.
+#
+# WHY THIS EXISTS
+# ---------------
+# `~/Library/Markdown` is both the derived-book tree AND, since 2026-07-19, the
+# archive target for the RSS briefings: make_report.py and make_weekly.py write
+# a Markdown copy of each day's briefing into `Feed Briefings/` with book-shaped
+# frontmatter, precisely so this indexer would file them "like everything else".
+# It did. By 2026-08-31 that was 43 generated documents -- 40 daily briefings, a
+# weekly, and some bare-date strays -- sitting in `books` alongside 261 real
+# ones.
+#
+# They are not merely surplus. Every briefing is a list of headlines in the same
+# template, so they embed at ~0.995 cosine to EACH OTHER: a tight synthetic knot
+# in a space whose real structure is diffuse. That knot won the book-affinity
+# ranking outright and had to be excluded by hand before the library map could
+# say anything true (see ~/2_projects/library_map, 2026-08-30). The daily
+# briefing kept adding one more every morning.
+#
+# The archive itself is worth keeping -- it just is not a book. Excluding it
+# here leaves the files on disk and in Nextcloud, and keeps `Feed Briefings/`
+# out of `books`, `book_chunks` and `embeddings`.
+#
+# Names are matched against the path RELATIVE to TARGET_DIR, so this skips a
+# top-level directory, not any directory that happens to share the name.
+# `reviews/` is deliberately NOT here: /bookreport output belongs in the corpus.
+EXCLUDE_DIRS = {"Feed Briefings"}
+
 
 # --- 2. DATABASE SETUP ---
 
@@ -259,7 +287,16 @@ def run_index(target_dir=None, run_id=None):
     setup_db(conn)
     indexed = get_indexed(conn)
 
-    md_files  = list(td.rglob("*.md"))
+    # relative_to(td) then take parts[0]: the top-level directory under the
+    # library root. A file sitting directly in the root has parts == (name,),
+    # so parts[0] is the filename and matches nothing in EXCLUDE_DIRS.
+    def _excluded(p: Path) -> bool:
+        try:
+            return p.relative_to(td).parts[0] in EXCLUDE_DIRS
+        except ValueError:          # not under td at all; index it
+            return False
+
+    md_files  = [p for p in td.rglob("*.md") if not _excluded(p)]
     new_count = 0
     failed    = 0
 

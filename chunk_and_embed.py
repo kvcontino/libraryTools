@@ -166,7 +166,75 @@ def chunk_paragraphs(body, target=TARGET_CHARS):
         buf.append(p); buf_len += len(p) + 2
     if buf:
         out.append("\n\n".join(buf))
-    return [c for c in out if len(c) >= MIN_CHARS]
+    return [c for c in out if len(c) >= MIN_CHARS and is_prose(c)]
+
+
+def is_prose(t: str) -> bool:
+    """Is this passage prose, or is it back-matter apparatus?
+
+    WHY THIS GATE EXISTS
+    --------------------
+    Book indexes, bibliographies and colophons were being embedded as though
+    they were prose, and they are GENERIC BY CONSTRUCTION: a page of
+    "Zelizer, Viviana A., 246, 306n.15" sits near every other book's index and
+    belongs to no subject at all. Two of the library map's 39 themes turned out
+    to be nothing but back-matter, and the first cross-book "bridge" list it
+    produced was largely indexes shaking hands across the library. Similarity
+    cannot rule them out, because they genuinely ARE similar to each other --
+    only content can.
+
+    This is not cosmetic. `/librarysearch` queries these same vectors and has no
+    exclusion of its own, so an index page is a live candidate answer to every
+    query it happens to sit near.
+
+    CALIBRATED HERE, NOT TRANSPLANTED -- and that distinction cost a near-miss.
+
+    The obvious move was to lift `prose_score()` from
+    `library_map/scripts/05_findings.py` verbatim, since it was developed and
+    measured there. Doing exactly that and MEASURING IT before deleting anything
+    showed it would drop **48,840 of 117,573 chunks -- 41.5% of the corpus** --
+    including passages that are plainly prose ("What comes to mind when you
+    think about criminals and crime? Odds are that you picture a burglar...").
+
+    It was not wrong there and right here; it was answering a different
+    question. In 05_findings.py it filters the top ~4,000 BRIDGE CANDIDATES --
+    passages already selected for being unusual -- where a 67% pass rate is
+    reasonable. As a corpus-wide ingest gate the same thresholds are a
+    percentile cut wearing a content cut's clothes: its `alpha >= 0.62` sits at
+    the corpus's p23, so it discards the bottom quarter by construction. And its
+    `pipes` term counts `#`, which matches every markdown heading and every
+    `#page-NN` anchor pandoc emits -- that term alone failed 30% of the corpus.
+    (Memory: feedback-probe-where-the-check-applies.)
+
+    So the thresholds below come from the corpus's own distribution, which is
+    genuinely bimodal on alpha:
+
+        0.00-0.15   14,820 chunks   the junk mode: index pages, pipe-table
+                                    wreckage, anchor soup
+        0.15-0.45    ~4,800         a thin, mixed valley
+        0.45-1.00   ~97,900         the prose mass
+
+      alpha >= 0.15   sits INSIDE the empty valley, not on the shoulder of the
+                      prose mass, so it removes the unambiguous junk and leaves
+                      every marginal case in.
+      pipes <= 0.02   `|` ONLY. Markdown tables converted from blog comment
+                      threads are the single largest source of non-prose here,
+                      and a chunk that is 2%+ pipe characters is a table.
+                      `#` is deliberately NOT counted: headings are prose
+                      structure, not apparatus.
+
+    Deliberately NO digits or sentence-count test. Both fire hard on legitimate
+    material -- statistics texts, tables of real data, poetry, aphorisms -- and
+    neither earned its false positives at corpus scale.
+
+    This is conservative on purpose. A passage wrongly kept is noise; a passage
+    wrongly dropped is a book the library can no longer answer from.
+    """
+    n = max(len(t), 1)
+    words = re.findall(r"[A-Za-z]{2,}", t)
+    alpha = sum(len(w) for w in words) / n
+    pipes = t.count("|") / n
+    return alpha >= 0.15 and pipes <= 0.02
 
 
 # ---------------------------------------------------------------------- main

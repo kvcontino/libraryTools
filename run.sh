@@ -16,12 +16,14 @@ set -euo pipefail
 # two expensive stages (conversion and embedding).
 VERIFY_ONLY=0
 SKIP_EMBED=0
+NO_INGEST=0
 for a in "$@"; do
   case "$a" in
     --verify-only) VERIFY_ONLY=1 ;;
     --skip-embed)  SKIP_EMBED=1 ;;
+    --no-ingest)   NO_INGEST=1 ;;
     *) echo "unknown flag: $a" >&2
-       echo "usage: run.sh [--verify-only] [--skip-embed]" >&2; exit 64 ;;
+       echo "usage: run.sh [--verify-only] [--skip-embed] [--no-ingest]" >&2; exit 64 ;;
   esac
 done
 
@@ -67,8 +69,34 @@ if [[ "$VERIFY_ONLY" == 1 ]]; then
     exit "$rc"
 fi
 
-echo "[$(date -Iseconds)] Starting ingest..."
-"$PYTHON" "$SCRIPT_DIR/ingest.py" --smallest-first
+# --no-ingest: index + chunk/embed + report, WITHOUT the conversion scan.
+#
+# WHY THIS MODE EXISTS. ingest.py scans SOURCE_DIR (~/6_reading) with a
+# top-level iterdir(). That directory holds five entries and no books; the
+# 61-title EPUB shelf is one level down in books/epub/, which the scan has never
+# looked at. So the weekly timer spent ~17 min CPU and 2.9 GB finding nothing,
+# every week, and reported success for doing it.
+#
+# The obvious fix -- repoint SOURCE_DIR at books/epub/ -- was MEASURED before
+# being applied (2026-08-31) and turns out to add nothing: all 61 EPUBs on that
+# shelf are already in the library, every one matching an existing row on an
+# exact normalised-token comparison, at every threshold from 0.3 to 1.0. There
+# is nothing there to ingest.
+#
+# Nothing arrives in ~/6_reading on its own any more either: it is a symlink
+# into Nextcloud2, and the Nextcloud leg died with kevadk in 2026-06. Files can
+# still be dropped there by hand -- which is exactly when you want a FULL run,
+# by hand, rather than a weekly scan of a directory nobody writes to.
+#
+# So the timer keeps the half that does real work (index + embed + report,
+# which is what makes /librarysearch current) and drops the half that cannot.
+if (( NO_INGEST )); then
+    echo "[$(date -Iseconds)] --no-ingest: conversion scan skipped (nothing arrives in SOURCE_DIR unattended)"
+    echo "                    add a book by hand? run without this flag."
+else
+    echo "[$(date -Iseconds)] Starting ingest..."
+    "$PYTHON" "$SCRIPT_DIR/ingest.py" --smallest-first
+fi
 
 echo "[$(date -Iseconds)] Starting index..."
 "$PYTHON" "$SCRIPT_DIR/index.py"

@@ -54,7 +54,17 @@ LIB_ROOT = Path("~/Library/Markdown").expanduser()
 
 # Same rule as index.EXCLUDE_DIRS, applied to md_path rather than to a live
 # filesystem walk -- the rows we are removing may name files that still exist.
-EXCLUDE_DIRS = {"Feed Briefings"}
+EXCLUDE_DIRS = {
+    "Feed Briefings",   # 40+ generated RSS digests with book-shaped frontmatter
+    # `reports` is the LIBRARY PIPELINE'S OWN OUTPUT. report.py writes a dated
+    # markdown file to ~/Library/Markdown/reports/ at the end of every run, and
+    # index.py then indexed it as a book on the next run -- the tool measuring
+    # the library was being counted as part of the library. Found 2026-09-03:
+    # 12 such rows, one of which had reached the chunker. Same defect class as
+    # the Feed Briefings above, missed because that fix looked at what the RSS
+    # pipeline wrote and not at what this pipeline writes.
+    "reports",
+}
 
 
 def targets(conn):

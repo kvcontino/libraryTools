@@ -53,6 +53,40 @@ if [[ "$VERIFY_ONLY" == 1 ]]; then
     else
         echo "  chunk_and_embed.py DOES NOT PARSE"; rc=1
     fi
+    # CHUNK/EMBEDDING PARITY. Chunking and embedding are two steps in one
+    # script, and only the first is pure python -- the second needs
+    # sentence-transformers, which only exists under `uv run --script`. Run the
+    # file with a bare python3 and it chunks happily, then dies on the import.
+    # That happened on 2026-09-03 and left 1,130 chunks with no vectors: every
+    # book had chunks, so every "is anything missing" query said yes, and the
+    # book was silently invisible to /librarysearch. Same shape as the 95-books-
+    # with-zero-chunks incident, one layer down and harder to see, because the
+    # obvious health question was already answering "fine".
+    #
+    # Counting rows is enough and is instant. A mismatch is never benign here:
+    # chunk_and_embed.py commits per batch, so an interrupt leaves a gap that
+    # only a re-run closes.
+    ce=$("$PYTHON" - "$SCRIPT_DIR" <<'PYEOF'
+import sqlite3, sys
+from pathlib import Path
+db = Path("~/Library/Markdown/library.db").expanduser()
+c = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+ch = c.execute("SELECT count(*) FROM book_chunks").fetchone()[0]
+em = c.execute("SELECT count(*) FROM embeddings").fetchone()[0]
+print(f"{ch} {em}")
+PYEOF
+)
+    read -r n_chunks n_embeds <<<"$ce"
+    if [[ "$n_chunks" == "$n_embeds" ]]; then
+        printf '  chunks == embeddings (%s)\n' "$n_chunks"
+    else
+        printf '  CHUNK/EMBEDDING MISMATCH: %s chunks, %s embeddings (%s unembedded)\n' \
+               "$n_chunks" "$n_embeds" "$(( n_chunks - n_embeds ))"
+        echo   "    fix: cd $SCRIPT_DIR && uv run --script chunk_and_embed.py"
+        echo   "    (NOT \`python3 chunk_and_embed.py\` — that chunks, then fails to import)"
+        rc=1
+    fi
+
     # The report is the cheap end-to-end proof: it opens the database, runs
     # every query, and would fail loudly on a schema drift.
     echo "[$(date -Iseconds)] Running report (reads the DB, writes nothing else)..."

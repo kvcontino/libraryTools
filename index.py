@@ -39,7 +39,17 @@ DB_PATH    = TARGET_DIR / "library.db"
 # Names are matched against the path RELATIVE to TARGET_DIR, so this skips a
 # top-level directory, not any directory that happens to share the name.
 # `reviews/` is deliberately NOT here: /bookreport output belongs in the corpus.
-EXCLUDE_DIRS = {"Feed Briefings"}
+EXCLUDE_DIRS = {
+    "Feed Briefings",   # 40+ generated RSS digests with book-shaped frontmatter
+    # `reports` is the LIBRARY PIPELINE'S OWN OUTPUT. report.py writes a dated
+    # markdown file to ~/Library/Markdown/reports/ at the end of every run, and
+    # index.py then indexed it as a book on the next run -- the tool measuring
+    # the library was being counted as part of the library. Found 2026-09-03:
+    # 12 such rows, one of which had reached the chunker. Same defect class as
+    # the Feed Briefings above, missed because that fix looked at what the RSS
+    # pipeline wrote and not at what this pipeline writes.
+    "reports",
+}
 
 
 # --- 2. DATABASE SETUP ---

@@ -169,6 +169,12 @@ def chunk_paragraphs(body, target=TARGET_CHARS):
     return [c for c in out if len(c) >= MIN_CHARS and is_prose(c)]
 
 
+# "Name, 246, 306n.15" -- a comma or semicolon, then a page number, optionally a
+# range or an "n.NN" note reference. Counted per 1k chars so the test is about
+# DENSITY of the shape, not the chunk's length.
+_INDEX_ENTRY = re.compile(r"[,;]\s*\d{1,4}(?:[-\u2013]\d{1,4})?(?:n\.?\d+)?(?=[,;\s]|$)")
+
+
 def is_prose(t: str) -> bool:
     """Is this passage prose, or is it back-matter apparatus?
 
@@ -234,7 +240,39 @@ def is_prose(t: str) -> bool:
     words = re.findall(r"[A-Za-z]{2,}", t)
     alpha = sum(len(w) for w in words) / n
     pipes = t.count("|") / n
-    return alpha >= 0.15 and pipes <= 0.02
+    if not (alpha >= 0.15 and pipes <= 0.02):
+        return False
+
+    # SECOND TERM, added 2026-09-03 after measuring the residue the alpha/pipes
+    # gate leaves behind. Zero chunks in the store now FAIL that gate -- it has
+    # done its job -- but 2,503 of 98,157 (2.55%) are still plainly index and
+    # endnote pages that clear alpha >= 0.15 because an index is, after all,
+    # made of real words: "Polk, Leonidas, 644, 648, 867".
+    #
+    # The tell is not digit DENSITY (narrative history is digit-dense: dates,
+    # casualty figures, page cites -- a naive digits test guts China 1945 and
+    # Albion's Seed). It is the repeated "comma, page-number" SHAPE, dozens of
+    # times in one chunk. Prose does not do that; an index does nothing else.
+    #
+    # Calibrated in the scope it runs in, not transplanted -- the same discipline
+    # the alpha threshold above was written for. Measured over all 98,157 chunks:
+    # this drops 2.55%, wipes NO book, and the samples read as unambiguous
+    # apparatus (index entries with page links; chapter endnote blocks). For
+    # contrast, 05_findings.py's prose_score() applied here would drop 29.1%,
+    # gut Albion's Seed to 420/2017 and Roll Jordan Roll to 355/1628, and wipe
+    # two books entirely. (Memory: feedback-calibrate-in-target-scope.)
+    #
+    # NOTE ON REACH: this gates CHUNKING, so it affects new books only. The 2,503
+    # already in the store stay until a deliberate re-chunk, which also means a
+    # re-embed of everything downstream -- hours, and not something to trigger
+    # as a side effect.
+    digits = sum(c.isdigit() for c in t) / n
+    index_shape = len(_INDEX_ENTRY.findall(t)) / (n / 1000)   # hits per 1k chars
+    if index_shape >= 12 and digits >= 0.06:
+        return False
+    if digits >= 0.20 and alpha <= 0.55:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------- main

@@ -2,7 +2,11 @@
 # /// script
 # requires-python = ">=3.10"
 # dependencies = [
-#     "mcp",
+#     # PINNED 2026-09-05. Unpinned, uv resolved mcp 2.x, where FastMCP was
+#     # renamed to MCPServer -- the import below raised ModuleNotFoundError
+#     # and the server died before registering, so Claude Code reported
+#     # CONNECTION_CLOSED with no tool ever advertised. Bump deliberately.
+#     "mcp<2",
 #     "sentence-transformers>=3",
 #     "einops",
 #     "numpy",

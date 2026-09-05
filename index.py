@@ -187,13 +187,46 @@ def warn_near_duplicates(conn, md_path, normalized_title, sha256):
             logging.warning(f"Near-duplicate title for {md_path.name} matches: {others}")
 
 
+# A converter's embedded metadata is not always better than the filename.
+# `Crabgrass Frontier - Kenneth Jackson.epub` carries `title: B004VV9LFO EBOK`
+# in its calibre frontmatter -- the Kindle ASIN -- and until 2026-09-05 that is
+# what the library called it, so `search_library(book="Crabgrass")` matched
+# nothing and every hit printed an identifier instead of a book. The frontmatter
+# still wins by default; it only loses when it is provably a machine id.
+# Verified against all 296 titled documents: fires on that one row, on none of
+# the other 295, and on none of "B0 Studio" / "1984" / "The 48 Laws of Power".
+IDENTIFIER_TITLE_RE = re.compile(
+    r"""^(?:
+          B0[0-9A-Z]{8}                                                  # Kindle ASIN
+        | [0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}   # UUID
+        | [0-9a-f]{32,}                                                  # bare hash
+        | \d{9}[\dXx]                                                    # bare ISBN-10
+        | \d{13}                                                         # bare ISBN-13
+       )
+       (?:\s+(?:EBOK|MOBI|EPUB|KINDLE|CALIBRE))?$""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+
+def resolve_title(meta, md_path):
+    """Frontmatter title, unless it is a machine identifier; then the filename."""
+    title = meta.get("title") or md_path.stem
+    if IDENTIFIER_TITLE_RE.match(title.strip()):
+        logging.warning(
+            f"{md_path.name}: frontmatter title {title!r} is a machine identifier; "
+            f"using filename {md_path.stem!r} instead"
+        )
+        return md_path.stem
+    return title
+
+
 def index_file(conn, md_path, run_id=None):
     with open(md_path, "r", errors="replace") as f:
         content = f.read()
 
     meta, body = parse_frontmatter(content)
 
-    title     = meta.get("title", md_path.stem)
+    title     = resolve_title(meta, md_path)
     author    = meta.get("author", "")
     source    = meta.get("source", "")
     converted = meta.get("converted", "")

@@ -125,6 +125,72 @@ def prefer_cached_hub():
     return f"offline — both repos cached under {root}"
 
 
+# ------------------------------------------------------------ markup strip
+# The converter's fingerprint was INSIDE the vectors. Every chunk was embedded
+# over text still carrying `{.calibre3}` spans, `::: {#CR!WDDHDN...}` fenced
+# divs, `[]{#anchor}` targets and calibre file-id hashes -- 6.6M characters of
+# it across 54,400 of 98,170 chunks (55.4%), in 181 of 251 books. That is why
+# two of the library map's 39 themes came back as back-matter and why cluster
+# #25's terms were masked by hash fragments until a stoplist was added.
+#
+# WHY THIS IS NOT `01_extract.py`'s MARKUP_RE, WHICH THE BACKLOG ITEM ASKED FOR.
+# That pattern was calibrated for a different JOB. There it computes a DENSITY
+# SCORE used to drop whole chunks, and over-matching is harmless -- it can only
+# inflate a number you then threshold. Here the pattern REWRITES text, where
+# over-matching silently mutilates it. Measured before promoting: its
+# `\{[^}]{0,200}\}` branch matches 8,141 non-attribute brace tokens, and they
+# are overwhelmingly LaTeX -- `{1}`, `{2}`, `{\theta}`, `{bmatrix}`, `{cases}`,
+# `{t-1}`. Promoting it verbatim would have turned `\frac{1}{6}` into `\frac`
+# and `\begin{bmatrix}` into `\begin` throughout the statistics and economics
+# books. Its `<[^>]{1,120}>` branch likewise eats `<https://census.gov/...>`
+# autolinks and the `<, >` of prose discussing the operators.
+#
+# So each branch below names only shapes a CONVERTER emits, never shapes an
+# AUTHOR writes. Measured against the whole corpus: it removes 6,617,377 chars
+# to the loose pattern's 6,722,977 -- 98.4% of the cleanup -- while preserving
+# 4,459 LaTeX tokens the loose one destroys. The 1.6% it declines to remove is
+# the price of not corrupting mathematics, and it is worth paying.
+MARKUP_RE = re.compile(
+    r"""
+      \[\]\{[^}]{0,200}\}                       # []{#anchor} -- before the brace rule
+    | `?\{=html\}`?                              # pandoc raw-html marker
+    | \{\s*[.\#][^}]{0,200}\}                    # {.class} {#id}
+    | \{\s*[A-Za-z-]+=[^}]{0,200}\}              # {width=100} {data-valign=top}
+    | \{\s*\}                                    # empty braces
+    | :::+[^\n]*                                  # ::: fenced div
+    | </?[A-Za-z][A-Za-z0-9:-]{0,40}(?:\s[^<>]{0,200})?/?>   # a real HTML tag
+    | ^[|+][-=:|\ ]+$                             # ASCII table rule
+    """, re.M | re.VERBOSE)
+
+# Collapse the whitespace a removal leaves behind, so "word {.cls} word" does not
+# become "word  word" and change the token stream for a second reason.
+_WS_RUN = re.compile(r"[ \t]{2,}")
+_BLANK_RUN = re.compile(r"\n{3,}")
+
+
+# A tag is not just noise -- some tags are the only thing SEPARATING two words.
+# Deleting them outright welds the words together, and the result is worse than
+# the markup was: `h<br>W<br>e<br>n` became `hWen`, and a 2,000-char table cell
+# came out as `hWenhdh1090IttanncomelPiDitercenesverge` -- confident garbage that
+# reads like a token rather than like damage. Caught on a 32-chunk trial run
+# BEFORE the 6-hour job, which is the entire reason for trialling it.
+#
+# So block-level tags collapse to a SPACE and inline tags collapse to nothing:
+#   a<sup>2</sup>b  -> a2b      (superscript is inside a word)
+#   h<br>W          -> h W      (a line break is between words)
+_BLOCK_TAG = re.compile(
+    r"</?(?:br|p|div|tr|td|th|li|ul|ol|h[1-6]|table|tbody|thead|blockquote|hr|section)\b[^<>]{0,200}/?>",
+    re.I)
+
+
+def strip_markup(text: str) -> str:
+    """Remove converter artifacts. Safe to REWRITE with -- see the note above."""
+    t = _BLOCK_TAG.sub(" ", text)      # separators first: they become whitespace
+    t = MARKUP_RE.sub("", t)           # then inline noise: it becomes nothing
+    t = _WS_RUN.sub(" ", t)
+    return _BLANK_RUN.sub("\n\n", t)
+
+
 # ---------------------------------------------------------------- chunking
 # Copied verbatim in behaviour from build_chunks.py. See module docstring.
 def split_long(text, target=TARGET_CHARS):
@@ -153,7 +219,11 @@ def split_long(text, target=TARGET_CHARS):
 
 
 def chunk_paragraphs(body, target=TARGET_CHARS):
-    paras = [p.strip() for p in re.split(r"\n\s*\n", body or "") if p.strip()]
+    # Strip BEFORE splitting, so chunk boundaries are computed on the text that
+    # will actually be embedded. Stripping afterwards would leave boundaries set
+    # by markup that is no longer there.
+    body = strip_markup(body or "")
+    paras = [p.strip() for p in re.split(r"\n\s*\n", body) if p.strip()]
     out, buf, buf_len = [], [], 0
     for p in paras:
         if len(p) > target:

@@ -142,6 +142,34 @@ def _rank(sims, ids, meta, n, book=None, exclude=None, per_book=None):
     return out
 
 
+def _clean(text: str) -> str:
+    """Strip converter markup for DISPLAY. Never touches the stored text.
+
+    The vectors were repaired on 2026-09-06, but only above 0.10 markup density
+    -- below that the embedding does not measurably move (cos 0.9908 at the
+    corpus median) and re-embedding 43k more chunks would have cost 20+ hours for
+    nothing. The *snippet* is a different matter: `{.calibre17}` and
+    `::: calibre38` are equally unreadable at density 0.04, and they are what a
+    person actually reads. So results are cleaned on the way out, which costs a
+    regex per hit and needs no re-embedding at all.
+
+    Uses chunk_and_embed's pattern so display and ingest cannot drift apart.
+    """
+    try:
+        import chunk_and_embed as _ce
+        import re as _re
+        t = _ce.strip_markup(text)
+        # Image references are legitimate markdown, not converter cruft, so they
+        # must NOT be stripped at ingest -- that would change the embeddings.
+        # In a snippet they are pure noise, and a hit that opens with
+        # "![Image](images/images/00008.jpg)" wastes the line you actually read.
+        # Display-only, deliberately not in strip_markup().
+        t = _re.sub(r"!\[[^\]]*\]\([^)]*\)", "", t)
+        return " ".join(t.split())
+    except Exception:
+        return " ".join(text.split())
+
+
 def search(query: str, n: int = 10, book: str | None = None, db: str = DEFAULT_DB):
     """[(score, title, chunk_index, text)] — the signature mcp_library_search expects."""
     ids, V, meta = _load_matrix(db)
@@ -150,7 +178,8 @@ def search(query: str, n: int = 10, book: str | None = None, db: str = DEFAULT_D
     q /= max(float(np.linalg.norm(q)), 1e-12)
     # 4-tuples: mcp_library_search.py unpacks (score, title, idx, text) and that
     # signature is the contract. The id rides along internally for the CLI.
-    return [h[:4] for h in _rank(V @ q, ids, meta, n, book=book)]
+    return [(sc, ti, ix, _clean(tx)) for sc, ti, ix, tx in
+            (h[:4] for h in _rank(V @ q, ids, meta, n, book=book))]
 
 
 def near(chunk_id: int, n: int = 10, per_book: int | None = 2, db: str = DEFAULT_DB):
@@ -186,7 +215,7 @@ def main():
         anchor = _load_matrix(a.db)[2].get(a.near)
         if anchor:
             print(f"near: {anchor[0]} (chunk {anchor[1]})")
-            print(f"      {' '.join(anchor[2].split())[:200]}\n")
+            print(f"      {_clean(anchor[2])[:200]}\n")
     elif a.query:
         ids_, V_, meta_ = _load_matrix(a.db)
         q = _load_model().encode([QUERY_PREFIX + a.query], show_progress_bar=False)[0]
@@ -205,7 +234,7 @@ def main():
         # chunk_index made the round-trip impossible: the first --near attempt
         # here pasted a displayed "chunk 512" and got "no embedding".
         tag = f"id {cid}, chunk {idx}" if cid is not None else f"chunk {idx}"
-        body = text if a.full else " ".join(text.split())[:300]
+        body = _clean(text) if a.full else _clean(text)[:300]
         print(f"[{score:.3f}] {title} ({tag})\n    {body}\n")
 
 

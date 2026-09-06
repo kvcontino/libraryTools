@@ -43,7 +43,7 @@ go stale.
     repair_markup.py --threshold 0.15   # only the worse tail (~3.6h)
     repair_markup.py --apply            # do it
 """
-import argparse, hashlib, sqlite3, sys, time
+import argparse, datetime, hashlib, json, sqlite3, sys, time
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import chunk_and_embed as ce
@@ -105,9 +105,22 @@ def main():
     if work:
         print(f"density       max {work[0][2]:.3f}  min {work[-1][2]:.3f}")
         print(f"estimate      {len(work)/0.57/3600:.1f} h at the measured 0.57 chunks/sec")
-    if a.dry_run or not work:
-        print("\ndry run — nothing written" if a.dry_run else "\nnothing to do")
-        return
+    def record(done):
+        state = Path.home() / ".local/state/library-tools"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "markup-repair.json").write_text(json.dumps({
+            "completed": datetime.datetime.now().replace(microsecond=0).isoformat(),
+            "threshold": a.threshold, "repaired": done,
+            "skipped_nonprose": len(skipped_nonprose),
+            "skipped_empty": len(skipped_empty), "corpus": total,
+        }, indent=2) + "\n")
+        print(f"recorded  {state/'markup-repair.json'}")
+
+    if a.dry_run:
+        print("\ndry run — nothing written"); return
+    if not work:
+        print("\nnothing to do at this threshold — recording completion")
+        record(0); return
 
     print(ce.prefer_cached_hub())
     t0 = time.time()
@@ -139,6 +152,12 @@ def main():
 
     print(f"\nrepaired {done:,} chunks in {(time.time()-t0)/3600:.2f} h")
     print("re-run to confirm: the work set should now be empty at this threshold.")
+
+    # Record completion so a backlog check can ask "did this finish?" in
+    # milliseconds. Recomputing means scanning all 98k chunks and stripping each,
+    # far beyond triage-verify's 20 s budget -- and a check that times out reports
+    # the item LIVE forever, the exact failure `check backlog` gates against.
+    record(done)
 
 
 if __name__ == "__main__":

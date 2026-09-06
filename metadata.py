@@ -140,6 +140,35 @@ JUNK_STEM_PATTERNS = [
     r"^hartbookfront\d*",
 ]
 
+# Junk that appears in a document's EMBEDDED metadata rather than its filename.
+# Distinct concept from JUNK_STEM_PATTERNS and deliberately a separate list: a
+# FILENAME is never "Microsoft Word - Document1", but a PDF /Title very often
+# is, because authoring and prepress tools stamp their own defaults there.
+#
+# Found 2026-09-05: `ingest.py` takes `meta.get("Title") or fpath.stem`, and
+# enrich() only *cleaned* a present /Title -- it never rejected one. So Kate
+# Brown's "Dispatches from Dystopia" was indexed, and cited by search, as
+# "ISO 15930 - Electronic document file format for prepress digital data
+# exchange (PDF/X)". Six of 251 books were affected; every one had a perfectly
+# good filename sitting unused. Validated against the whole corpus before
+# landing: these patterns match those six and nothing else -- in particular
+# they must NOT catch "1984", "Rome" or "Snoop", which are real short titles.
+JUNK_TITLE_PATTERNS = [
+    r"^microsoft word\s*[-\u2013].*",                 # Word's default /Title
+    r"^iso\s*\d{3,}\b.*",                             # prepress/standards boilerplate
+    r"^adobe\b.*",
+    r"^acrobat\b.*",
+    r".*\.(pdf|epub|mobi|djvu|txt|qxp|indd)$",        # a title ending in a file extension
+    r"^\d+\s*\*.*",                                   # "0 *Introduction" (TOC artifact)
+    r"^(print|output|final|draft|proof|layout)\s*\d*$",
+]
+
+
+def title_looks_like_metadata_junk(title: str) -> bool:
+    """True if `title` looks like a tool's default rather than a real title."""
+    t = (title or "").strip()
+    return any(re.fullmatch(p, t, flags=re.IGNORECASE) for p in JUNK_TITLE_PATTERNS)
+
 
 def clean_title_from_filename(stem: str) -> str:
     """Strip libgen-style tails, replace underscores, normalize whitespace."""
@@ -196,6 +225,8 @@ def title_looks_garbage(title: str | None) -> bool:
     if not t:
         return True
     if len(t) < 4:
+        return True
+    if title_looks_like_metadata_junk(t):
         return True
     return stem_looks_like_junk(t)
 
@@ -468,10 +499,21 @@ def enrich(
                 pass
 
     # --- title fallback chain (2) ---
-    if title_looks_garbage(meta.get("title")) and body_path and body_path.exists():
-        h1 = title_from_markdown(body_path)
-        if h1 and not title_looks_garbage(h1):
-            meta["title"] = h1
+    if title_looks_garbage(meta.get("title")):
+        replaced = False
+        if body_path and body_path.exists():
+            h1 = title_from_markdown(body_path)
+            if h1 and not title_looks_garbage(h1):
+                meta["title"] = h1
+                replaced = True
+        # Filename fallback. Previously the chain stopped at the H1 and left the
+        # junk title in place when the markdown had no usable heading -- which is
+        # how six embedded-metadata titles survived ingest while a good filename
+        # sat right there. Only used when the stem is not itself junk.
+        if not replaced and not stem_looks_like_junk(fpath.stem):
+            cleaned = clean_title_from_filename(fpath.stem)
+            if cleaned and not title_looks_garbage(cleaned):
+                meta["title"] = cleaned
 
     # --- external lookup (8) ---
     if enrich_external:

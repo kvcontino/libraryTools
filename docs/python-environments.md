@@ -58,7 +58,7 @@ Running `.venv/bin/python -c "import marker"` works because Python looks in *thi
 You can usually tell by looking at `pyvenv.cfg`:
 ```
 $ cat .venv/pyvenv.cfg
-home = /home/contino/.local/share/uv/python/...   ← made by uv
+home = /home/you/.local/share/uv/python/...        ← made by uv
 implementation = CPython
 uv = 0.11.0                                        ← made by uv
 ```

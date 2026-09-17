@@ -424,9 +424,27 @@ def main(dry_run=False, enrich_external=False, smallest_first=False, formats=Non
     if ENRICH_EXTERNAL:
         logging.info("External enrichment ENABLED (Open Library / Crossref).")
 
+    # Recursive, because the shelf is not flat. ~/6_reading was reorganised into
+    # books/{epub,mobi,pdf}/, articles-and-papers/ and essays-and-web-archives/
+    # after the original ingest, and this scan was never repointed -- iterdir()
+    # only ever saw the top level, which holds no files at all. Rows ingested
+    # before the move still carry flat `source` paths (~/6_reading/Foo.pdf),
+    # which is its fingerprint.
+    #
+    # run.sh's --no-ingest comment already diagnosed this on 2026-08-31 and
+    # measured that repointing added nothing, because all 61 shelved EPUBs were
+    # already in the library. True then, and it left the hole this closes: that
+    # same comment tells you to do a FULL manual run when you add a book by hand,
+    # and a full manual run could not see a book added to the shelf, because the
+    # shelf is one level down. Dropping in an EPUB and running run.sh was a no-op.
+    #
+    # Fixed 2026-09-16 while adding three titles. 171 of the 172 files this now
+    # finds are already converted, so the widened scan costs one skip check each;
+    # it does NOT pull the articles/essays subtrees in as new work.
     files_to_process = [
-        f for f in SOURCE_DIR.iterdir()
-        if f.suffix.lower() in {".pdf", ".epub", ".mobi"}
+        f for f in SOURCE_DIR.rglob("*")
+        if f.is_file()
+        and f.suffix.lower() in {".pdf", ".epub", ".mobi"}
     ]
 
     if smallest_first:

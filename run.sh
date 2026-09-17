@@ -105,17 +105,25 @@ fi
 
 # --no-ingest: index + chunk/embed + report, WITHOUT the conversion scan.
 #
-# WHY THIS MODE EXISTS. ingest.py scans SOURCE_DIR (~/6_reading) with a
-# top-level iterdir(). That directory holds five entries and no books; the
-# 61-title EPUB shelf is one level down in books/epub/, which the scan has never
-# looked at. So the weekly timer spent ~17 min CPU and 2.9 GB finding nothing,
-# every week, and reported success for doing it.
+# WHY THIS MODE EXISTS. Until 2026-09-16, ingest.py scanned SOURCE_DIR
+# (~/6_reading) with a top-level iterdir(). That directory holds five entries
+# and no books; the EPUB shelf is one level down in books/epub/, which the scan
+# never looked at. So the weekly timer spent ~17 min CPU and 2.9 GB finding
+# nothing, every week, and reported success for doing it.
 #
-# The obvious fix -- repoint SOURCE_DIR at books/epub/ -- was MEASURED before
-# being applied (2026-08-31) and turns out to add nothing: all 61 EPUBs on that
-# shelf are already in the library, every one matching an existing row on an
-# exact normalised-token comparison, at every threshold from 0.3 to 1.0. There
-# is nothing there to ingest.
+# Repointing the scan was MEASURED before being applied (2026-08-31) and added
+# nothing: all 61 EPUBs on that shelf were already in the library, every one
+# matching an existing row on an exact normalised-token comparison, at every
+# threshold from 0.3 to 1.0. There was nothing there to ingest -- so the scan
+# was left broken, correctly, on the evidence available.
+#
+# That measurement answered "is anything MISSING today" and not "can this scan
+# see a book I add tomorrow", and those come apart: the paragraph below tells
+# you to do a full manual run when you add a book by hand, and a full manual run
+# could not see a book added to the shelf. Dropping an EPUB into books/epub/ and
+# running run.sh was a silent no-op. ingest.py now walks SOURCE_DIR recursively
+# (2026-09-16), which found the 3 titles added that day and nothing else: 171 of
+# 172 files were already converted.
 #
 # Nothing arrives in ~/6_reading on its own any more either: it is a symlink
 # into Nextcloud2, and the Nextcloud leg died with kevadk in 2026-06. Files can

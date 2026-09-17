@@ -70,6 +70,27 @@ _model = None
 _cache = {}
 
 
+def _db_fingerprint(db: str):
+    """(size, mtime_ns) for the database and its -wal sidecar.
+
+    The -wal half is the point. The library is journal_mode=wal, so an ingest
+    lands in library.db-wal and the main file's mtime does NOT move until a
+    checkpoint -- watching library.db alone would miss a fresh batch of books,
+    which is the exact staleness this fingerprint exists to catch.
+
+    A missing part reads as None rather than raising: -wal is absent whenever
+    the database has been checkpointed and closed cleanly, which is normal.
+    """
+    out = []
+    for p in (Path(db), Path(f"{db}-wal")):
+        try:
+            st = p.stat()
+            out.append((st.st_size, st.st_mtime_ns))
+        except OSError:
+            out.append(None)
+    return tuple(out)
+
+
 def _load_model():
     global _model
     if _model is None:
@@ -81,11 +102,25 @@ def _load_model():
 def _load_matrix(db: str):
     """(ids, unit-norm matrix, {id: (title, chunk_index, text)}) for the collection.
 
-    Cached per-process: the MCP server stays resident, so this is paid once and
-    every later call is a matmul.
+    Cached per-process, keyed on a fingerprint of the database file: the MCP
+    server stays resident, so the build is paid once and every later call is a
+    matmul -- but the cache must notice an ingest, or the resident tool answers
+    from the corpus as it stood at server start. It does that silently: a
+    semantic search over a stale matrix returns ten plausible hits rather than
+    an error, so nothing surfaces the problem. Three books added 2026-09-16 were
+    invisible to `search_library` while being perfectly searchable from a fresh
+    process, which is how this was found.
+
+    The fingerprint is taken BEFORE the read, deliberately. If a write lands
+    while the matrix is being built, the entry is stored under the older
+    fingerprint and the next call rebuilds -- one wasted build. Taking it after
+    the read would cache a half-old matrix under the new fingerprint and keep it
+    forever, which is the failure being fixed.
     """
-    if db in _cache:
-        return _cache[db]
+    fp = _db_fingerprint(db)
+    hit = _cache.get(db)
+    if hit is not None and hit[0] == fp:
+        return hit[1]
     conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     coll = conn.execute("SELECT id FROM collections WHERE name=?", (COLLECTION,)).fetchone()
     if not coll:
@@ -108,8 +143,9 @@ def _load_matrix(db: str):
             "SELECT id, title, chunk_index, text FROM book_chunks"
         )
     }
-    _cache[db] = (np.array(ids), V, meta)
-    return _cache[db]
+    loaded = (np.array(ids), V, meta)
+    _cache[db] = (fp, loaded)
+    return loaded
 
 
 def _rank(sims, ids, meta, n, book=None, exclude=None, per_book=None):
